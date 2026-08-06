@@ -114,15 +114,31 @@ Saludos cordiales.`;
   return { subject, body };
 }
 
+const MIN_HOURS_FOR_1D_REMINDER = 12;
+const MIN_MINUTES_FOR_1H_REMINDER = 5;
+
 async function processAppointment(deviceId, patient, appointment, device) {
   if (!appointment || appointment.status !== 'pending') return;
   if (!patient?.email && !device?.pushToken) return;
 
   const apptTime = buildApptDateTime(appointment);
+  if (!apptTime) return;
   const now = new Date();
 
+  if (apptTime.getTime() <= now.getTime()) {
+    return;
+  }
+
+  const hoursUntilAppt = (apptTime.getTime() - now.getTime()) / (60 * 60 * 1000);
+  const minutesUntilAppt = (apptTime.getTime() - now.getTime()) / (60 * 1000);
+
   const oneDayBefore = dayBefore9am(appointment);
-  if (oneDayBefore && now >= oneDayBefore && !appointment.notified1dAt) {
+  if (
+    oneDayBefore
+    && now.getTime() >= oneDayBefore.getTime()
+    && hoursUntilAppt >= MIN_HOURS_FOR_1D_REMINDER
+    && !appointment.notified1dAt
+  ) {
     let emailResult = null;
     if (patient.email && process.env.MOCK_MAIL !== 'true' && loadConfig()) {
       try {
@@ -156,13 +172,16 @@ async function processAppointment(deviceId, patient, appointment, device) {
     }
     await updateApptInSnapshot(deviceId, patient.id, appointment.id, patch);
     console.log(
-      `[scheduler] 1d device=${deviceId} appt=${appointment.id} email=${emailResult ? (emailResult.ok ? 'sent' : 'fail') : 'skip'} push=${pushResult.ok ? 'ok' : pushResult.error}`
+      `[scheduler] 1d device=${deviceId} appt=${appointment.id} hoursUntil=${hoursUntilAppt.toFixed(1)} email=${emailResult ? (emailResult.ok ? 'sent' : 'fail') : 'skip'} push=${pushResult.ok ? 'ok' : pushResult.error}`
     );
   }
 
-  if (!apptTime) return;
   const oneHourBefore = new Date(apptTime.getTime() - 60 * 60 * 1000);
-  if (now >= oneHourBefore && !appointment.notified1hAt) {
+  if (
+    now.getTime() >= oneHourBefore.getTime()
+    && minutesUntilAppt >= MIN_MINUTES_FOR_1H_REMINDER
+    && !appointment.notified1hAt
+  ) {
     const pushResult = device.pushToken
       ? await pushService.sendPush({
           token: device.pushToken,
@@ -173,7 +192,7 @@ async function processAppointment(deviceId, patient, appointment, device) {
       notified1hAt: new Date().toISOString(),
     });
     console.log(
-      `[scheduler] 1h device=${deviceId} appt=${appointment.id} push=${pushResult.ok ? 'ok' : pushResult.error}`
+      `[scheduler] 1h device=${deviceId} appt=${appointment.id} minutesUntil=${minutesUntilAppt.toFixed(1)} push=${pushResult.ok ? 'ok' : pushResult.error}`
     );
   }
 }
