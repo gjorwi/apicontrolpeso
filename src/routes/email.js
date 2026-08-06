@@ -8,24 +8,32 @@ const router = express.Router();
 
 router.get('/status', requireAuth, (req, res) => {
   const pub = getPublicConfig();
-  if (!pub) return res.json({ configured: false });
-  return res.json({ configured: true, fromEmail: pub.fromEmail, fromName: pub.fromName, host: pub.host, port: pub.port, secure: pub.secure, user: pub.user, updatedAt: pub.updatedAt });
+  if (!pub) return res.json({ configured: false, provider: 'resend' });
+  return res.json({
+    configured: true,
+    provider: 'resend',
+    fromEmail: pub.fromEmail,
+    fromName: pub.fromName,
+    updatedAt: pub.updatedAt,
+  });
 });
 
 router.post('/config', requireAuth, rateLimit({ max: 10 }), (req, res) => {
   try {
-    const cfg = req.body?.config;
-    if (!cfg || typeof cfg !== 'object') return res.status(400).json({ error: 'INVALID_BODY', message: 'Falta config.' });
-    const saved = saveConfig(cfg);
+    const input = req.body?.config || req.body || {};
+    const saved = saveConfig({
+      fromEmail: input.fromEmail,
+      fromName: input.fromName,
+    });
     resetTransport();
     return res.json({ ok: true, fromEmail: saved.fromEmail, fromName: saved.fromName });
   } catch (e) {
-    console.error('[smtp] saveConfig error:', e?.message || e);
-    if (String(e.message || '').toLowerCase().includes('requerido')) {
+    console.error('[resend] saveConfig error:', e?.message || e);
+    if (String(e.message || '').toLowerCase().includes('requerido') || String(e.message || '').includes('inválido')) {
       return res.status(400).json({ error: 'VALIDATION', message: e.message });
     }
     if (String(e.message || '').includes('ENCRYPTION_KEY')) {
-      return res.status(500).json({ error: 'SERVER_MISCONFIG', message: 'Servidor sin ENCRYPTION_KEY configurada. Revisar .env del servidor.' });
+      return res.status(500).json({ error: 'SERVER_MISCONFIG', message: 'Servidor sin ENCRYPTION_KEY. Revisar .env.' });
     }
     return res.status(500).json({ error: 'SERVER_ERROR', message: 'No se pudo guardar la configuración.' });
   }
@@ -37,20 +45,45 @@ router.post('/test', requireAuth, rateLimit({ max: 5 }), async (req, res) => {
     return res.status(400).json({ error: 'INVALID_EMAIL', message: 'Email de prueba inválido.' });
   }
   if (process.env.MOCK_MAIL === 'true') {
-    console.log(`[mock-mail] test to=${testEmail}`);
+    console.log(`[mock-mail][resend] test to=${testEmail}`);
     return res.json({ ok: true, mock: true });
   }
+  if (!process.env.RESEND_API_KEY) {
+    return res.status(500).json({
+      error: 'NO_RESEND_KEY',
+      message: 'Servidor sin RESEND_API_KEY. Configurala en Render → Environment.',
+    });
+  }
   try {
-    const info = await sendMail({ to: testEmail, subject: 'Prueba de ControlPeso', body: 'Este es un correo de prueba del sistema ControlPeso. Si lo recibes, la configuración SMTP es correcta.' });
+    const info = await sendMail({
+      to: testEmail,
+      subject: 'Prueba de ControlPeso',
+      body: 'Este es un correo de prueba del sistema ControlPeso. Si lo recibes, la integración con Resend funciona correctamente.',
+    });
     return res.json({ ok: true, messageId: info.messageId });
   } catch (e) {
-    if (e.code === 'NO_SMTP_CONFIGURED') {
-      return res.status(409).json({ error: 'NO_SMTP_CONFIGURED', message: 'Configura SMTP antes de probar.' });
+    if (e.code === 'NO_SENDER_CONFIGURED') {
+      return res.status(409).json({ error: 'NO_SENDER_CONFIGURED', message: 'Configura el remitente en la app antes de probar.' });
     }
-    if (e.code === 'SMTP_AUTH') {
-      return res.status(400).json({ error: 'SMTP_AUTH', message: 'Credenciales inválidas. Verifica usuario y contraseña (App Password si usas Gmail con 2FA).' });
+    if (e.code === 'NO_RESEND_KEY') {
+      return res.status(500).json({ error: 'NO_RESEND_KEY', message: 'Servidor sin RESEND_API_KEY.' });
     }
-    return res.status(500).json({ error: 'SMTP_ERROR', message: e.message || 'Falló el envío.' });
+    if (e.code === 'RESEND_AUTH') {
+      return res.status(500).json({ error: 'RESEND_AUTH', message: 'RESEND_API_KEY inválida o revocada.' });
+    }
+    if (e.code === 'RESEND_FROM_NOT_VERIFIED') {
+      return res.status(400).json({
+        error: 'RESEND_FROM_NOT_VERIFIED',
+        message: 'El remitente no está verificado en Resend. Verificá el dominio o usá uno del sandbox onresend.dev.',
+      });
+    }
+    if (e.code === 'RESEND_VALIDATION') {
+      return res.status(400).json({ error: 'RESEND_VALIDATION', message: e.message });
+    }
+    if (e.code === 'RESEND_RATE_LIMIT') {
+      return res.status(429).json({ error: 'RESEND_RATE_LIMIT', message: 'Límite de envío de Resend alcanzado. Reintentá más tarde.' });
+    }
+    return res.status(500).json({ error: 'SEND_ERROR', message: e.message || 'Falló el envío.' });
   }
 });
 
@@ -67,23 +100,28 @@ router.post('/send-appointment-email', requireAuth, idempotencyStore(), rateLimi
   }
 
   if (process.env.MOCK_MAIL === 'true') {
-    console.log(`[mock-mail] to=${to} subject="${subject}" body_len=${body.length}`);
+    console.log(`[mock-mail][resend] to=${to} subject="${subject}" body_len=${body.length}`);
     return res.json({ ok: true, mock: true });
   }
 
-  const cfg = loadConfig();
-  if (!cfg) {
-    return res.status(409).json({ error: 'NO_SMTP_CONFIGURED', message: 'SMTP no configurado en el servidor.' });
+  if (!process.env.RESEND_API_KEY) {
+    return res.status(500).json({ error: 'NO_RESEND_KEY', message: 'Servidor sin RESEND_API_KEY.' });
+  }
+  if (!loadConfig()) {
+    return res.status(409).json({ error: 'NO_SENDER_CONFIGURED', message: 'Remitente no configurado en el servidor.' });
   }
 
   try {
     const info = await sendMail({ to, subject, body });
     return res.json({ ok: true, messageId: info.messageId });
   } catch (e) {
-    if (e.code === 'SMTP_AUTH') {
-      return res.status(400).json({ error: 'SMTP_AUTH', message: 'Credenciales SMTP inválidas.' });
+    if (e.code === 'RESEND_FROM_NOT_VERIFIED') {
+      return res.status(400).json({ error: 'RESEND_FROM_NOT_VERIFIED', message: 'Remitente no verificado en Resend.' });
     }
-    return res.status(500).json({ error: 'SMTP_ERROR', message: e.message || 'No se pudo enviar el correo.' });
+    if (e.code === 'RESEND_RATE_LIMIT') {
+      return res.status(429).json({ error: 'RESEND_RATE_LIMIT', message: 'Límite de Resend alcanzado.' });
+    }
+    return res.status(500).json({ error: 'SEND_ERROR', message: e.message || 'No se pudo enviar el correo.' });
   }
 });
 

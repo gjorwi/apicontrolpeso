@@ -14,8 +14,9 @@
   "dependencies": {
     "cors": "^2.8.5",
     "dotenv": "^16.4.5",
+    "expo-server-sdk": "^3.7.0",
     "express": "^4.19.2",
     "mongoose": "^8.16.4",
-    "nodemailer": "^6.9.14"
+    "resend": "^4.0.0"
   }
 }

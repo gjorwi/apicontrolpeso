@@ -58,22 +58,16 @@ function loadConfig() {
   }
 }
 
-function saveConfig(cfg) {
+function saveConfig(input) {
   ensureDir();
   const sanitized = {
-    host: String(cfg.host || '').trim(),
-    port: Number(cfg.port) || 587,
-    secure: !!cfg.secure,
-    user: String(cfg.user || '').trim(),
-    pass: String(cfg.pass || ''),
-    fromName: String(cfg.fromName || 'ControlPeso').trim(),
-    fromEmail: String(cfg.fromEmail || cfg.user || '').trim(),
+    provider: 'resend',
+    fromEmail: String(input.fromEmail || '').trim(),
+    fromName: String(input.fromName || 'ControlPeso').trim(),
     updatedAt: new Date().toISOString(),
   };
-  if (!sanitized.host) throw new Error('host requerido');
-  if (!sanitized.user) throw new Error('user requerido');
-  if (!sanitized.pass) throw new Error('pass requerido');
   if (!sanitized.fromEmail) throw new Error('fromEmail requerido');
+  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(sanitized.fromEmail)) throw new Error('fromEmail inválido');
   const b64 = encrypt(sanitized);
   fs.writeFileSync(DATA_FILE, b64, 'utf8');
   cache = sanitized;
@@ -83,8 +77,7 @@ function saveConfig(cfg) {
 function getPublicConfig() {
   const cfg = loadConfig();
   if (!cfg) return null;
-  const { pass, ...pub } = cfg;
-  return pub;
+  return { ...cfg };
 }
 
 module.exports = { loadConfig, saveConfig, getPublicConfig };

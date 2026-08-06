@@ -21,3 +21,7 @@ services:
         sync: false
       - key: MONGODB_URI
         sync: false
+      - key: RESEND_API_KEY
+        sync: false
+      - key: RESEND_DEFAULT_FROM
+        sync: false
