@@ -20,8 +20,12 @@ router.post('/config', requireAuth, rateLimit({ max: 10 }), (req, res) => {
     resetTransport();
     return res.json({ ok: true, fromEmail: saved.fromEmail, fromName: saved.fromName });
   } catch (e) {
-    if (String(e.message).toLowerCase().includes('requerido')) {
+    console.error('[smtp] saveConfig error:', e?.message || e);
+    if (String(e.message || '').toLowerCase().includes('requerido')) {
       return res.status(400).json({ error: 'VALIDATION', message: e.message });
+    }
+    if (String(e.message || '').includes('ENCRYPTION_KEY')) {
+      return res.status(500).json({ error: 'SERVER_MISCONFIG', message: 'Servidor sin ENCRYPTION_KEY configurada. Revisar .env del servidor.' });
     }
     return res.status(500).json({ error: 'SERVER_ERROR', message: 'No se pudo guardar la configuración.' });
   }

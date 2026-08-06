@@ -50,13 +50,34 @@ async function sendMail({ to, subject, body, fromOverride }) {
     e.code = 'SMTP_INIT_ERROR';
     throw e;
   }
-  const from = fromOverride || `"${cfg.fromName}" <${cfg.fromEmail}>`;
+  const senderEmail = fromOverride || cfg.fromEmail || cfg.user;
+  const fromName = cfg.fromName || cfg.user;
+  const from = `"${fromName}" <${senderEmail}>`;
+
+  if (cfg.user && senderEmail && cfg.user.toLowerCase() !== senderEmail.toLowerCase()) {
+    console.warn(`[mailer] from (${senderEmail}) != auth user (${cfg.user}). Esto suele activar filtros anti-spoofing.`);
+  }
+
+  const domain = String(senderEmail).split('@')[1] || '';
+  const messageIdDomain = domain || 'localhost';
+
+  const headers = {
+    'Reply-To': senderEmail,
+    'X-Priority': '3',
+    'X-Mailer': 'ControlPeso/1.0',
+    'List-Unsubscribe': `<mailto:${senderEmail}?subject=unsubscribe>`,
+    'List-Unsubscribe-Post': 'List-Unsubscribe=One-Click',
+  };
+
   try {
     const info = await transport.sendMail({
       from,
       to,
       subject,
       text: body,
+      headers,
+      envelope: { from: senderEmail, to },
+      messageId: `<${Date.now()}.${Math.random().toString(36).slice(2)}@${messageIdDomain}>`,
     });
     return { messageId: info.messageId };
   } catch (e) {
