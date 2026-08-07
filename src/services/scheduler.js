@@ -1,5 +1,6 @@
 const syncStore = require('./syncStore');
 const deviceStore = require('./deviceStore');
+const notificationStore = require('./notificationStore');
 const pushService = require('./pushService');
 const { sendMail } = require('./mailer');
 const { loadConfig } = require('./smtpStore');
@@ -9,6 +10,7 @@ let running = false;
 let lastTickAt = 0;
 
 const TICK_MS = Number(process.env.SCHEDULER_TICK_MS) || 60000;
+const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
 function pad2(n) {
   return String(n).padStart(2, '0');
@@ -33,27 +35,6 @@ function dayBefore9am(appointment) {
   d.setDate(d.getDate() - 1);
   d.setHours(9, 0, 0, 0);
   return d;
-}
-
-async function updateApptInSnapshot(deviceId, patientId, appointmentId, patch) {
-  const snap = await syncStore.get(deviceId);
-  if (!snap) return false;
-  const patients = Array.isArray(snap.data?.patients) ? snap.data.patients : [];
-  let changed = false;
-  for (const p of patients) {
-    if (p.id !== patientId) continue;
-    const appts = Array.isArray(p.appointments) ? p.appointments : [];
-    for (const a of appts) {
-      if (a.id !== appointmentId) continue;
-      Object.assign(a, patch);
-      changed = true;
-      break;
-    }
-    if (changed) break;
-  }
-  if (!changed) return false;
-  await syncStore.set(deviceId, { data: { patients }, ts: new Date().toISOString() });
-  return true;
 }
 
 function buildPushPayload({ patient, appointment, kind }) {
@@ -85,7 +66,7 @@ function buildPushPayload({ patient, appointment, kind }) {
   };
 }
 
-function buildEmailPayload({ patient, appointment }) {
+function buildEmailPayload({ patient, appointment, kind = '1d' }) {
   const dateISO = appointment.date;
   const time = appointment.time || '09:00';
   const date = new Date(dateISO + 'T00:00:00');
@@ -96,10 +77,15 @@ function buildEmailPayload({ patient, appointment }) {
   const medName = patient?.injectionMed ? patient.injectionMed : null;
   const medLine = medName ? `\nMedicamento: ${medName}` : '';
   const notes = appointment.notes ? `\nNotas: ${appointment.notes}` : '';
-  const subject = `Recordatorio de cita - ${dateLabel}`;
+  const subject = kind === '1h'
+    ? `Recordatorio: tu cita es hoy en 1 hora (${time})`
+    : `Recordatorio de cita - ${dateLabel}`;
+  const intro = kind === '1h'
+    ? 'Te recordamos que tu cita es HOY, en 1 hora.'
+    : 'Te recordamos tu cita programada.';
   const body = `Hola ${patient?.name || ''},
 
-Te recordamos tu cita programada.
+${intro}
 
 Detalles de la cita:
 - Tipo: ${typeLabel}
@@ -116,6 +102,89 @@ Saludos cordiales.`;
 
 const MIN_HOURS_FOR_1D_REMINDER = 12;
 const MIN_MINUTES_FOR_1H_REMINDER = 5;
+const MAX_EMAIL_ATTEMPTS = 5;
+const MAX_PUSH_ATTEMPTS = 10;
+const EMAIL_BACKOFF_MIN = [5, 30, 120, 720, 1440];
+const PUSH_BACKOFF_MIN = [5, 30, 120, 720, 1440, 2880, 5760, 11520, 23040, 46080];
+const CLAIM_LOST = Symbol('claim_lost');
+
+function nowISO() {
+  return new Date().toISOString();
+}
+
+function retryAfter(attempts, table) {
+  const idx = Math.min(Math.max(attempts - 1, 0), table.length - 1);
+  return new Date(Date.now() + table[idx] * 60 * 1000).toISOString();
+}
+
+function shouldSend(cur) {
+  if (!cur) return true;
+  if (cur.status === 'sent' || cur.status === 'skipped') return false;
+  if (cur.gaveUp) return false;
+  if (cur.nextRetryAt && new Date(cur.nextRetryAt).getTime() > Date.now()) return false;
+  return true;
+}
+
+async function tryEmail(field, kind, cur, ctx) {
+  const { deviceId, patient, appointment } = ctx;
+  if (!patient.email) {
+    return { status: 'no_email', at: nowISO(), attempts: 0, error: null };
+  }
+  if (process.env.MOCK_MAIL === 'true' || !loadConfig()) {
+    return { status: 'skipped', at: nowISO(), attempts: cur?.attempts || 0, error: 'smtp_not_configured' };
+  }
+  const claimed = await notificationStore.claimAction(deviceId, appointment.id, field);
+  if (!claimed) {
+    return CLAIM_LOST;
+  }
+  let attempts = cur?.attempts || 0;
+  try {
+    const { subject, body } = buildEmailPayload({ patient, appointment, kind });
+    const info = await sendMail({ to: patient.email, subject, body });
+    return { status: 'sent', at: nowISO(), attempts: 0, messageId: info.messageId || null, error: null, nextRetryAt: null, gaveUp: false };
+  } catch (e) {
+    attempts++;
+    const failed = { status: 'failed', at: nowISO(), attempts, error: e.message };
+    if (attempts >= MAX_EMAIL_ATTEMPTS) {
+      failed.gaveUp = true;
+      failed.nextRetryAt = null;
+    } else {
+      failed.gaveUp = false;
+      failed.nextRetryAt = retryAfter(attempts, EMAIL_BACKOFF_MIN);
+    }
+    console.error(`[scheduler] email fail device=${deviceId} appt=${appointment.id} kind=${kind} err=${e.message}`);
+    return failed;
+  }
+}
+
+async function tryPush(field, kind, cur, ctx) {
+  const { deviceId, device, patient, appointment } = ctx;
+  if (!device.pushToken) {
+    return { status: 'skipped', at: nowISO(), attempts: 0, error: 'NO_TOKEN' };
+  }
+  const claimed = await notificationStore.claimAction(deviceId, appointment.id, field);
+  if (!claimed) {
+    return CLAIM_LOST;
+  }
+  const res = await pushService.sendPush({
+    token: device.pushToken,
+    ...buildPushPayload({ patient, appointment, kind }),
+  });
+  if (res.ok) {
+    return { status: 'sent', at: nowISO(), attempts: 0, error: null, nextRetryAt: null, gaveUp: false };
+  }
+  const attempts = (cur?.attempts || 0) + 1;
+  const failed = { status: 'failed', at: nowISO(), attempts, error: res.error || 'UNKNOWN' };
+  if (attempts >= MAX_PUSH_ATTEMPTS) {
+    failed.gaveUp = true;
+    failed.nextRetryAt = null;
+  } else {
+    failed.gaveUp = false;
+    failed.nextRetryAt = retryAfter(attempts, PUSH_BACKOFF_MIN);
+  }
+  console.error(`[scheduler] push fail device=${deviceId} appt=${appointment.id} kind=${kind} err=${failed.error}`);
+  return failed;
+}
 
 async function processAppointment(deviceId, patient, appointment, device) {
   if (!appointment || appointment.status !== 'pending') return;
@@ -124,77 +193,45 @@ async function processAppointment(deviceId, patient, appointment, device) {
   const apptTime = buildApptDateTime(appointment);
   if (!apptTime) return;
   const now = new Date();
-
-  if (apptTime.getTime() <= now.getTime()) {
-    return;
-  }
+  if (apptTime.getTime() <= now.getTime()) return;
 
   const hoursUntilAppt = (apptTime.getTime() - now.getTime()) / (60 * 60 * 1000);
   const minutesUntilAppt = (apptTime.getTime() - now.getTime()) / (60 * 1000);
 
   const oneDayBefore = dayBefore9am(appointment);
-  if (
+  const in1dWindow = !!(
     oneDayBefore
     && now.getTime() >= oneDayBefore.getTime()
     && hoursUntilAppt >= MIN_HOURS_FOR_1D_REMINDER
-    && !appointment.notified1dAt
-  ) {
-    let emailResult = null;
-    if (patient.email && process.env.MOCK_MAIL !== 'true' && loadConfig()) {
-      try {
-        const { subject, body } = buildEmailPayload({ patient, appointment });
-        const info = await sendMail({ to: patient.email, subject, body });
-        emailResult = { ok: true, messageId: info.messageId };
-      } catch (e) {
-        emailResult = { ok: false, error: e.message };
-        console.error(`[scheduler] email fail device=${deviceId} appt=${appointment.id} err=${e.message}`);
-      }
-    }
-    const pushResult = device.pushToken
-      ? await pushService.sendPush({
-          token: device.pushToken,
-          ...buildPushPayload({ patient, appointment, kind: '1d' }),
-        })
-      : { ok: false, error: 'NO_TOKEN' };
-    const patch = {
-      notified1dAt: new Date().toISOString(),
-    };
-    if (emailResult) {
-      if (emailResult.ok) {
-        patch.emailStatus = 'sent';
-        patch.emailSentAt = new Date().toISOString();
-        patch.emailMessageId = emailResult.messageId || null;
-        patch.emailLastError = null;
-      } else {
-        patch.emailStatus = 'failed';
-        patch.emailLastError = emailResult.error;
-      }
-    }
-    await updateApptInSnapshot(deviceId, patient.id, appointment.id, patch);
-    console.log(
-      `[scheduler] 1d device=${deviceId} appt=${appointment.id} hoursUntil=${hoursUntilAppt.toFixed(1)} email=${emailResult ? (emailResult.ok ? 'sent' : 'fail') : 'skip'} push=${pushResult.ok ? 'ok' : pushResult.error}`
-    );
-  }
-
+  );
   const oneHourBefore = new Date(apptTime.getTime() - 60 * 60 * 1000);
-  if (
-    now.getTime() >= oneHourBefore.getTime()
-    && minutesUntilAppt >= MIN_MINUTES_FOR_1H_REMINDER
-    && !appointment.notified1hAt
-  ) {
-    const pushResult = device.pushToken
-      ? await pushService.sendPush({
-          token: device.pushToken,
-          ...buildPushPayload({ patient, appointment, kind: '1h' }),
-        })
-      : { ok: false, error: 'NO_TOKEN' };
-    await updateApptInSnapshot(deviceId, patient.id, appointment.id, {
-      notified1hAt: new Date().toISOString(),
-    });
-    console.log(
-      `[scheduler] 1h device=${deviceId} appt=${appointment.id} minutesUntil=${minutesUntilAppt.toFixed(1)} push=${pushResult.ok ? 'ok' : pushResult.error}`
-    );
+  const in1hWindow = now.getTime() >= oneHourBefore.getTime() && minutesUntilAppt >= MIN_MINUTES_FOR_1H_REMINDER;
+
+  const ctx = { deviceId, device, patient, appointment };
+  const stored = (await notificationStore.getState(deviceId, appointment.id)) || {};
+
+  const decide = async (field, kind, existing, inWindow, sendFn) => {
+    if (!inWindow) return existing || null;
+    if (!shouldSend(existing)) return existing || null;
+    return sendFn(field, kind, existing, ctx);
+  };
+
+  const results = {
+    push1d: await decide('push1d', '1d', stored.push1d, in1dWindow, tryPush),
+    push1h: await decide('push1h', '1h', stored.push1h, in1hWindow, tryPush),
+    email1d: await decide('email1d', '1d', stored.email1d, in1dWindow, tryEmail),
+    email1h: await decide('email1h', '1h', stored.email1h, in1hWindow, tryEmail),
+  };
+
+  const patch = { patientId: patient.id };
+  for (const [k, v] of Object.entries(results)) {
+    if (v !== CLAIM_LOST) patch[k] = v ?? null;
   }
+  await notificationStore.setState(deviceId, appointment.id, patch);
+
+  console.log(
+    `[scheduler] appt device=${deviceId} appt=${appointment.id} hoursUntil=${hoursUntilAppt.toFixed(1)} p1d=${results.push1d?.status || '-'} p1h=${results.push1h?.status || '-'} e1d=${results.email1d?.status || '-'} e1h=${results.email1h?.status || '-'}`
+  );
 }
 
 async function tick() {
