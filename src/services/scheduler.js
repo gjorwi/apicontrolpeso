@@ -12,29 +12,91 @@ let lastTickAt = 0;
 const TICK_MS = Number(process.env.SCHEDULER_TICK_MS) || 60000;
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
+// Zona horaria de la clínica. La app guarda fecha/hora en hora local del
+// dispositivo (sin zona), así que necesitamos saber dónde interpretarlas.
+// Si no se configura, se asume UTC para no cambiar el comportamiento previo.
+const APPT_TIMEZONE = process.env.APPT_TIMEZONE || 'UTC';
+
 function pad2(n) {
   return String(n).padStart(2, '0');
+}
+
+// Convierte una hora "de pared" local (y,mes0,d,h,min) al instante UTC real
+// teniendo en cuenta la zona horaria (y DST) configurada en APPT_TIMEZONE.
+function wallToUtc(tz, y, m0, d, hh, mm) {
+  const wallMs = Date.UTC(y, m0, d, hh, mm);
+  if (!tz || tz === 'UTC' || tz === 'Etc/UTC') return wallMs;
+  let utcGuess = wallMs;
+  try {
+    const fmt = new Intl.DateTimeFormat('en-US', {
+      timeZone: tz,
+      hour12: false,
+      year: 'numeric', month: '2-digit', day: '2-digit',
+      hour: '2-digit', minute: '2-digit', second: '2-digit',
+    });
+    for (let i = 0; i < 3; i++) {
+      const parts = fmt.formatToParts(new Date(utcGuess));
+      const map = {};
+      for (const p of parts) map[p.type] = p.value;
+      const guessWall = Date.UTC(
+        Number(map.year), Number(map.month) - 1, Number(map.day),
+        Number(map.hour) % 24, Number(map.minute)
+      );
+      const delta = guessWall - utcGuess;
+      utcGuess = wallMs - delta;
+    }
+    const parts = fmt.formatToParts(new Date(utcGuess));
+    const map = {};
+    for (const p of parts) map[p.type] = p.value;
+    const back = Date.UTC(
+      Number(map.year), Number(map.month) - 1, Number(map.day),
+      Number(map.hour) % 24, Number(map.minute)
+    );
+    return Math.abs(back - wallMs) <= 3600000 ? utcGuess : wallMs;
+  } catch (e) {
+    return wallMs;
+  }
 }
 
 function buildApptDateTime(appointment) {
   if (!appointment?.date) return null;
   const date = String(appointment.date);
   const time = String(appointment.time || '09:00');
-  const m = time.match(/^(\d{1,2}):(\d{2})/);
-  const hh = m ? Number(m[1]) : 9;
-  const mm = m ? Number(m[2]) : 0;
-  const iso = `${date}T${pad2(hh)}:${pad2(mm)}:00`;
-  const d = new Date(iso);
-  return isNaN(d.getTime()) ? null : d;
+  const dm = date.match(/^(\d{4})-(\d{2})-(\d{2})/);
+  if (!dm) return null;
+  const tm = time.match(/^(\d{1,2}):(\d{2})/);
+  const y = Number(dm[1]);
+  const m0 = Number(dm[2]) - 1;
+  const d = Number(dm[3]);
+  const hh = tm ? Number(tm[1]) : 9;
+  const mm = tm ? Number(tm[2]) : 0;
+  const ms = wallToUtc(APPT_TIMEZONE, y, m0, d, hh, mm);
+  return isNaN(ms) ? null : new Date(ms);
 }
 
 function dayBefore9am(appointment) {
   if (!appointment?.date) return null;
-  const d = new Date(String(appointment.date) + 'T00:00:00');
-  if (isNaN(d.getTime())) return null;
-  d.setDate(d.getDate() - 1);
-  d.setHours(9, 0, 0, 0);
-  return d;
+  const date = String(appointment.date);
+  const dm = date.match(/^(\d{4})-(\d{2})-(\d{2})/);
+  if (!dm) return null;
+  const y = Number(dm[1]);
+  const m0 = Number(dm[2]) - 1;
+  const d = Number(dm[3]);
+  const apptMidnightUtc = wallToUtc(APPT_TIMEZONE, y, m0, d, 0, 0);
+  const prevUtc = new Date(apptMidnightUtc - 86400000);
+  const fmt = new Intl.DateTimeFormat('en-US', {
+    timeZone: APPT_TIMEZONE,
+    hour12: false,
+    year: 'numeric', month: '2-digit', day: '2-digit',
+  });
+  const parts = fmt.formatToParts(prevUtc);
+  const map = {};
+  for (const p of parts) map[p.type] = p.value;
+  const py = Number(map.year);
+  const pm0 = Number(map.month) - 1;
+  const pd = Number(map.day);
+  const ms = wallToUtc(APPT_TIMEZONE, py, pm0, pd, 9, 0);
+  return isNaN(ms) ? null : new Date(ms);
 }
 
 function buildPushPayload({ patient, appointment, kind }) {
@@ -291,6 +353,7 @@ function getStatus() {
     tickMs: TICK_MS,
     lastTickAt,
     inFlight: running,
+    apptTimezone: APPT_TIMEZONE,
   };
 }
 
