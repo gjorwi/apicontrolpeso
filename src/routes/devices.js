@@ -44,7 +44,40 @@ router.get('/status', requireAuth, async (req, res, next) => {
     }
     const device = await deviceStore.getDeviceToken(deviceId);
     if (!device) return res.json({ registered: false });
-    return res.json({ registered: true, platform: device.platform, updatedAt: device.updatedAt });
+    return res.json({
+      registered: true,
+      platform: device.platform,
+      updatedAt: device.updatedAt,
+      tokenPrefix: typeof device.pushToken === 'string' ? device.pushToken.slice(0, 24) : '',
+    });
+  } catch (e) {
+    next(e);
+  }
+});
+
+// Envía un push de prueba al dispositivo. Devuelve el resultado real de Expo
+// para diagnosticar de inmediato si el token es válido o si hay que reinstalar.
+router.post('/test-push', requireAuth, async (req, res, next) => {
+  try {
+    const { deviceId } = req.body || {};
+    if (!deviceId) {
+      return res.status(400).json({ error: 'INVALID_BODY', message: 'Falta deviceId.' });
+    }
+    const device = await deviceStore.getDeviceToken(deviceId);
+    if (!device || !device.pushToken) {
+      return res.status(404).json({ error: 'NO_DEVICE', message: 'Dispositivo sin token registrado. Abrí la app para registrarlo.' });
+    }
+    const r = await pushService.sendPush({
+      token: device.pushToken,
+      title: 'ControlPeso',
+      body: 'Push de prueba. Si ves esto, las notificaciones funcionan.',
+      data: { type: 'test_push' },
+    });
+    const tokenPrefix = device.pushToken.slice(0, 20);
+    if (r.ok) {
+      return res.json({ ok: true, tokenPrefix, ticketId: r.ticketId });
+    }
+    return res.json({ ok: false, tokenPrefix, error: r.error, message: r.message || r.error });
   } catch (e) {
     next(e);
   }

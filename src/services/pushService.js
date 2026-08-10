@@ -15,6 +15,28 @@ function isValidToken(token) {
   return PUSH_TOKEN_RE.test(token);
 }
 
+async function waitForReceipt(client, ticketId, token) {
+  // El ticket solo confirma que Expo aceptó; la entrega real (y errores como
+  // DeviceNotRegistered) aparece en el receipt. Esperamos unos segundos.
+  const waits = [1000, 2000, 3000];
+  for (const w of waits) {
+    await new Promise((r) => setTimeout(r, w));
+    try {
+      const recs = await client.getPushReceiptsAsync([ticketId]);
+      const rec = recs && recs[0];
+      if (rec?.status === 'ok') return { status: 'sent' };
+      if (rec?.status === 'error') {
+        const code = rec.details?.error || 'UNKNOWN';
+        console.warn(`[push] receipt error token=${token.slice(0, 20)}... ticket=${ticketId} code=${code} msg=${rec.details?.message || ''}`);
+        return { status: 'error', code };
+      }
+    } catch (e) {
+      console.warn('[push] receipt check error:', e?.message);
+    }
+  }
+  return { status: 'reported_ok' };
+}
+
 async function sendPush({ token, title, body, data = {}, sound = 'default', channelId }) {
   if (!token) {
     return { ok: false, error: 'NO_TOKEN' };
@@ -38,6 +60,12 @@ async function sendPush({ token, title, body, data = {}, sound = 'default', chan
       return { ok: false, error: 'NO_TICKET' };
     }
     if (ticket.status === 'ok') {
+      const r = await waitForReceipt(client, ticket.id, token);
+      if (r.status === 'sent') return { ok: true, ticketId: ticket.id };
+      if (r.status === 'error') {
+        console.error(`[push] not delivered token=${token.slice(0, 20)}... code=${r.code}`);
+        return { ok: false, ticketId: ticket.id, error: r.code };
+      }
       return { ok: true, ticketId: ticket.id };
     }
     if (ticket.status === 'error') {
