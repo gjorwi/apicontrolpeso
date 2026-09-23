@@ -1,6 +1,6 @@
 const express = require('express');
-const { sendMail, resetTransport } = require('../services/mailer');
-const { saveConfig, getPublicConfig, loadConfig } = require('../services/smtpStore');
+const { sendMail, resetTransport, getEffectiveSender } = require('../services/mailer');
+const { saveConfig, loadConfig } = require('../services/smtpStore');
 const { rateLimit, idempotencyStore } = require('../middleware/limiters');
 const requireAuth = require('../middleware/auth');
 const syncStore = require('../services/syncStore');
@@ -42,22 +42,48 @@ Saludos cordiales.`;
   return { subject, body };
 }
 
+// Persiste la config que manda la app solo si el servidor no tiene una
+// guardada (nunca pisa una config custom). Si fallar el guardado pero el
+// email es válido, devuelve { fallback } para usarlo como fromOverride de
+// este envío en curso.
+async function persistIncomingSmtpConfig(smtpConfig) {
+  if (!smtpConfig || typeof smtpConfig !== 'object') return null;
+  if (loadConfig()) return null;
+  const fromEmail = String(smtpConfig.fromEmail || '').trim();
+  const fromName = String(smtpConfig.fromName || '').trim();
+  if (!fromEmail || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(fromEmail)) return null;
+  try {
+    const saved = await saveConfig({ fromEmail, fromName: fromName || undefined });
+    resetTransport();
+    console.log('[resend] config persistida desde la app:', saved.fromEmail);
+    return saved;
+  } catch (e) {
+    console.warn('[resend] no se pudo persistir smtpConfig de la app:', e.message);
+    return { fromEmail, fromName: fromName || 'ControlPeso', fallback: true };
+  }
+}
+
+function fromOverrideOf(persisted) {
+  return persisted && persisted.fallback ? persisted.fromEmail : null;
+}
+
 router.get('/status', requireAuth, (req, res) => {
-  const pub = getPublicConfig();
-  if (!pub) return res.json({ configured: false, provider: 'resend' });
+  const eff = getEffectiveSender();
+  if (!eff) return res.json({ configured: false, provider: 'resend' });
   return res.json({
     configured: true,
     provider: 'resend',
-    fromEmail: pub.fromEmail,
-    fromName: pub.fromName,
-    updatedAt: pub.updatedAt,
+    fromEmail: eff.fromEmail,
+    fromName: eff.fromName,
+    source: eff.source,
+    updatedAt: eff.updatedAt || undefined,
   });
 });
 
-router.post('/config', requireAuth, rateLimit({ max: 10 }), (req, res) => {
+router.post('/config', requireAuth, rateLimit({ max: 10 }), async (req, res) => {
   try {
     const input = req.body?.config || req.body || {};
-    const saved = saveConfig({
+    const saved = await saveConfig({
       fromEmail: input.fromEmail,
       fromName: input.fromName,
     });
@@ -124,7 +150,7 @@ router.post('/test', requireAuth, rateLimit({ max: 5 }), async (req, res) => {
 });
 
 router.post('/send-appointment-email', requireAuth, idempotencyStore(), rateLimit({ max: 60 }), async (req, res) => {
-  const { to, subject, body } = req.body || {};
+  const { to, subject, body, smtpConfig } = req.body || {};
   if (!to || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(to)) {
     return res.status(400).json({ error: 'INVALID_TO', message: 'Email destino inválido.' });
   }
@@ -143,12 +169,15 @@ router.post('/send-appointment-email', requireAuth, idempotencyStore(), rateLimi
   if (!process.env.RESEND_API_KEY) {
     return res.status(500).json({ error: 'NO_RESEND_KEY', message: 'Servidor sin RESEND_API_KEY.' });
   }
-  if (!loadConfig()) {
+
+  const persisted = await persistIncomingSmtpConfig(smtpConfig);
+  const fromOverride = fromOverrideOf(persisted);
+  if (!getEffectiveSender() && !fromOverride) {
     return res.status(409).json({ error: 'NO_SENDER_CONFIGURED', message: 'Remitente no configurado en el servidor.' });
   }
 
   try {
-    const info = await sendMail({ to, subject, body });
+    const info = await sendMail({ to, subject, body, fromOverride });
     return res.json({ ok: true, messageId: info.messageId });
   } catch (e) {
     if (e.code === 'RESEND_FROM_NOT_VERIFIED') {
@@ -162,7 +191,7 @@ router.post('/send-appointment-email', requireAuth, idempotencyStore(), rateLimi
 });
 
 router.post('/retry-appointment-email', requireAuth, rateLimit({ max: 30 }), async (req, res) => {
-  const { deviceId, patientId, appointmentId, kind } = req.body || {};
+  const { deviceId, patientId, appointmentId, kind, smtpConfig } = req.body || {};
   const emailKind = kind === '1h' ? '1h' : '1d';
   if (!deviceId || !patientId || !appointmentId) {
     return res.status(400).json({ error: 'INVALID_BODY', message: 'Falta deviceId, patientId o appointmentId.' });
@@ -202,13 +231,15 @@ router.post('/retry-appointment-email', requireAuth, rateLimit({ max: 30 }), asy
   if (!process.env.RESEND_API_KEY) {
     return res.status(500).json({ error: 'NO_RESEND_KEY', message: 'Servidor sin RESEND_API_KEY.' });
   }
-  if (!loadConfig()) {
+  const persisted = await persistIncomingSmtpConfig(smtpConfig);
+  const fromOverride = fromOverrideOf(persisted);
+  if (!getEffectiveSender() && !fromOverride) {
     return res.status(409).json({ error: 'NO_SENDER_CONFIGURED', message: 'Remitente no configurado en el servidor.' });
   }
 
   try {
     const { subject, body } = buildAppointmentEmail(appointment, patient, emailKind);
-    const info = await sendMail({ to: patient.email, subject, body });
+    const info = await sendMail({ to: patient.email, subject, body, fromOverride });
     await setState({ status: 'sent', at: now, attempts: 0, messageId: info.messageId || null, error: null, nextRetryAt: null });
     console.log(`[retry] email sent device=${deviceId} appt=${appointmentId} kind=${emailKind} to=${patient.email} id=${info.messageId}`);
     return res.json({ ok: true, kind: emailKind, emailStatus: 'sent', messageId: info.messageId });

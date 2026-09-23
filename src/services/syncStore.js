@@ -74,4 +74,17 @@ async function set(deviceId, { data, ts }) {
   fileWrite(all);
 }
 
-module.exports = { initDb, get, set };
+async function getAll() {
+  if (mongoReady && SnapshotModel) {
+    const docs = await SnapshotModel.find({}).lean();
+    return docs.map((d) => ({ deviceId: d.deviceId, data: d.data || {}, ts: d.ts || '' }));
+  }
+  const all = fileRead() || {};
+  return Object.entries(all).map(([deviceId, entry]) => ({
+    deviceId,
+    data: entry.data || {},
+    ts: entry.ts || '',
+  }));
+}
+
+module.exports = { initDb, get, set, getAll };

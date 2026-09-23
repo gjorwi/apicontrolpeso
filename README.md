@@ -32,7 +32,10 @@ Servidor Node/Express para la app móvil **ControlPeso**. Realiza dos funciones:
 | `API_TOKEN` | Token que la app móvil envía en `Authorization: Bearer ...` |
 | `ENCRYPTION_KEY` | 64 chars hex (32 bytes). Generar con `node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"` |
 | `MOCK_MAIL` | `true` para no enviar correos reales, solo loguear (útil para dev) |
-| `MONGODB_URI` | URI de MongoDB Atlas (opcional). Si está definida, los snapshots de sync se guardan en Mongo. Si no, se usa un archivo JSON local. |
+| `MONGODB_URI` | URI de MongoDB Atlas (opcional). Si está definida, los snapshots de sync **y la config SMTP** se guardan en Mongo. Si no, se usan archivos locales. |
+| `RESEND_API_KEY` | API key de Resend para enviar correos por HTTP. |
+| `RESEND_DEFAULT_FROM` | Remitente de respaldo. Se usa si la app aún no guardó config, así el servidor siempre puede enviar sin reconfigurar. |
+| `RESEND_DEFAULT_NAME` | Nombre del remitente de respaldo (default: `ControlPeso`). |
 
 ## Endpoints
 
@@ -130,7 +133,7 @@ Una vez desplegado, desde la app:
 - El servicio se duerme tras 15 min sin uso → el primer request puede tardar ~30s.
 - 750 horas/mes de uptime (más que suficiente para un consultorio).
 - Sin tarjeta requerida para el free tier.
-- **Filesystem efímero**: sin MongoDB, los snapshots de sync y la config SMTP se pierden al redeploy. **Recomendado**: usar MongoDB Atlas (free 1GB) para el sync.
+- **Filesystem efímero**: sin MongoDB, los snapshots de sync y la config SMTP se pierden al redeploy. **Con `MONGODB_URI` la config SMTP persiste en Mongo** (y si la app detecta que falta, la vuelve a enviar sola); además `RESEND_DEFAULT_FROM` sirve como último recurso.
 
 ## Seguridad
 - HTTPS obligatorio en producción.
@@ -144,7 +147,7 @@ Una vez desplegado, desde la app:
 | Error | Causa probable | Solución |
 |---|---|---|
 | `SMTP_AUTH` | Usuario o contraseña incorrectos | Verifica usuario y usa App Password si es Gmail con 2FA |
-| `NO_SMTP_CONFIGURED` | No se guardó la config en el backend | Configura SMTP desde la app |
+| `NO_SMTP_CONFIGURED` | No hay remitente en el servidor ni `RESEND_DEFAULT_FROM` | La app lo auto-configura al abrir Configuración; o setea `RESEND_DEFAULT_FROM` en Render |
 | `RATE_LIMIT` | Demasiados envíos | Espera unos minutos |
 | `ECONNREFUSED` | Puerto SMTP bloqueado | Usa 587 (STARTTLS) o 465 (SSL/TLS) |
 | `Greeting never received` | Timeout de conexión | Verifica host y firewall |

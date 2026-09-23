@@ -43,7 +43,13 @@ function idempotencyStore() {
     }
     const origJson = res.json.bind(res);
     res.json = (body) => {
-      try { map.set(key, { at: now, status: res.statusCode || 200, body }); } catch (_) {}
+      // Solo se cachean éxitos: así un fallo transitorio (409/429/5xx) no
+      // bloquea el reintento inmediato con la misma key.
+      try {
+        if ((res.statusCode || 200) < 300) {
+          map.set(key, { at: now, status: res.statusCode || 200, body });
+        }
+      } catch (_) {}
       return origJson(body);
     };
     next();

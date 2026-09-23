@@ -4,7 +4,10 @@ const Expo = ExpoModule.Expo || ExpoModule.default || ExpoModule;
 let expo = null;
 
 function getClient() {
-  if (!expo) expo = new Expo();
+  if (!expo) {
+    const accessToken = process.env.EXPO_ACCESS_TOKEN || '';
+    expo = accessToken ? new Expo({ accessToken }) : new Expo();
+  }
   return expo;
 }
 

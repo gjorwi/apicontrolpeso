@@ -7,6 +7,7 @@ const deviceRoutes = require('./routes/devices');
 const syncStore = require('./services/syncStore');
 const deviceStore = require('./services/deviceStore');
 const notificationStore = require('./services/notificationStore');
+const smtpStore = require('./services/smtpStore');
 const scheduler = require('./services/scheduler');
 
 const app = express();
@@ -64,6 +65,12 @@ async function start() {
     console.log(`[db] notification storage=${usedMongoNotif ? 'MongoDB (Mongoose)' : 'archivo JSON (fallback)'}`);
   } catch (e) {
     console.warn('[db] notification init error, fallback archivo JSON:', e.message);
+  }
+  try {
+    const usedMongoSmtp = await smtpStore.initDb();
+    console.log(`[db] smtp storage=${usedMongoSmtp ? 'MongoDB (Mongoose)' : 'archivo local (fallback)'}`);
+  } catch (e) {
+    console.warn('[db] smtp init error, fallback archivo:', e.message);
   }
   const server = app.listen(port, '0.0.0.0', () => {
     console.log(`[server] listening on :${port} (env=${process.env.NODE_ENV || 'development'}, mock=${process.env.MOCK_MAIL === 'true'}) pid=${process.pid}`);

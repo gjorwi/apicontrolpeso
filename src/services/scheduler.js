@@ -2,8 +2,7 @@ const syncStore = require('./syncStore');
 const deviceStore = require('./deviceStore');
 const notificationStore = require('./notificationStore');
 const pushService = require('./pushService');
-const { sendMail } = require('./mailer');
-const { loadConfig } = require('./smtpStore');
+const { sendMail, getEffectiveSender } = require('./mailer');
 
 let intervalHandle = null;
 let running = false;
@@ -192,7 +191,7 @@ async function tryEmail(field, kind, cur, ctx) {
   if (!patient.email) {
     return { status: 'no_email', at: nowISO(), attempts: 0, error: null };
   }
-  if (process.env.MOCK_MAIL === 'true' || !loadConfig()) {
+  if (process.env.MOCK_MAIL === 'true' || !getEffectiveSender()) {
     return { status: 'skipped', at: nowISO(), attempts: cur?.attempts || 0, error: 'smtp_not_configured' };
   }
   const claimed = await notificationStore.claimAction(deviceId, appointment.id, field);

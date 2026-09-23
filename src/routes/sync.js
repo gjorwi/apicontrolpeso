@@ -2,9 +2,39 @@ const express = require('express');
 const requireAuth = require('../middleware/auth');
 const syncStore = require('../services/syncStore');
 const notificationStore = require('../services/notificationStore');
+const scheduler = require('../services/scheduler');
 
 const router = express.Router();
 router.use(requireAuth);
+
+router.get('/discover', async (req, res, next) => {
+  try {
+    const all = await syncStore.getAll();
+    if (!all || all.length === 0) {
+      return res.json({ ok: true, found: false });
+    }
+    let latest = null;
+    for (const snap of all) {
+      const patients = snap.data?.patients || [];
+      if (patients.length === 0) continue;
+      if (!latest || (snap.ts && snap.ts > latest.ts)) {
+        latest = snap;
+      }
+    }
+    if (!latest) {
+      return res.json({ ok: true, found: false });
+    }
+    return res.json({
+      ok: true,
+      found: true,
+      deviceId: latest.deviceId,
+      count: (latest.data?.patients || []).length,
+      ts: latest.ts,
+    });
+  } catch (e) {
+    next(e);
+  }
+});
 
 async function attachNotify(patients, deviceId) {
   if (!deviceId || !Array.isArray(patients)) return;
@@ -107,6 +137,9 @@ router.post('/:deviceId', async (req, res, next) => {
     const totalAppts = merged.reduce((acc, p) => acc + (Array.isArray(p.appointments) ? p.appointments.length : 0), 0);
     await syncStore.set(deviceId, { data: { patients: merged }, ts: incomingTs });
     await attachNotify(merged, deviceId);
+    // Procesa los recordatorios pendientes de inmediato (no espera al intervalo),
+    // así el scheduler dispara push/email aunque el proceso de Render haya dormido.
+    void scheduler.tick().catch((e) => console.error('[sync] on-demand tick error:', e?.message));
     console.log(`[sync] device=${deviceId} patients=${merged.length} appointments=${totalAppts} incoming=${Array.isArray(patients) ? patients.length : 0} deleted=${tombstoneIds.size} ts=${incomingTs}`);
     return res.json({ ok: true, accepted: true, ts: incomingTs, data: { patients: merged } });
   } catch (e) {

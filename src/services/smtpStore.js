@@ -6,6 +6,10 @@ const ALGO = 'aes-256-gcm';
 const IV_LEN = 12;
 const AUTH_TAG_LEN = 16;
 const DATA_FILE = path.join(__dirname, '..', '..', 'data', 'smtp.enc');
+const MONGO_KEY = 'smtp';
+
+let SmtpConfigModel = null;
+let mongoReady = false;
 
 function getKey() {
   const hex = process.env.ENCRYPTION_KEY || '';
@@ -44,22 +48,80 @@ function decrypt(b64) {
 
 let cache = null;
 
-function loadConfig() {
-  if (cache) return cache;
+function readFileConfig() {
   try {
     if (!fs.existsSync(DATA_FILE)) return null;
     const b64 = fs.readFileSync(DATA_FILE, 'utf8');
-    const cfg = decrypt(b64);
-    cache = cfg;
-    return cfg;
+    return decrypt(b64);
   } catch (e) {
-    console.warn('[smtpStore] failed to load config:', e.message);
+    console.warn('[smtpStore] failed to load file config:', e.message);
     return null;
   }
 }
 
-function saveConfig(input) {
-  ensureDir();
+function loadConfig() {
+  if (cache) return cache;
+  const fileCfg = readFileConfig();
+  if (fileCfg) cache = fileCfg;
+  return cache;
+}
+
+// Persiste la config en MongoDB (sobrevive redeploys de Render) y mantiene el
+// archivo cifrado como cache secundario para dev local sin MONGODB_URI.
+async function initDb() {
+  const uri = process.env.MONGODB_URI || process.env.DATABASE_URL || '';
+  if (!uri) {
+    console.log('[smtpStore] sin MONGODB_URI: la config SMTP se guarda solo en archivo (efímero en Render)');
+    return false;
+  }
+  try {
+    const mongoose = require('mongoose');
+    if (mongoose.connection.readyState !== 1) {
+      await mongoose.connect(uri, { serverSelectionTimeoutMS: 10000 });
+    }
+    const schema = new mongoose.Schema(
+      {
+        key: { type: String, required: true, unique: true },
+        provider: { type: String, default: 'resend' },
+        fromEmail: { type: String, required: true },
+        fromName: { type: String, default: 'ControlPeso' },
+        updatedAt: { type: String, default: '' },
+      },
+      { collection: 'smtp_config', minimize: false }
+    );
+    SmtpConfigModel = mongoose.models.SmtpConfig || mongoose.model('SmtpConfig', schema);
+    mongoReady = true;
+
+    const doc = await SmtpConfigModel.findOne({ key: MONGO_KEY }).lean();
+    if (doc && doc.fromEmail) {
+      cache = {
+        provider: doc.provider || 'resend',
+        fromEmail: String(doc.fromEmail),
+        fromName: String(doc.fromName || 'ControlPeso'),
+        updatedAt: doc.updatedAt || '',
+      };
+    } else {
+      const fileCfg = readFileConfig();
+      if (fileCfg && fileCfg.fromEmail) {
+        cache = fileCfg;
+        try {
+          await SmtpConfigModel.updateOne({ key: MONGO_KEY }, { $set: fileCfg }, { upsert: true });
+          console.log('[smtpStore] config migrada de archivo a MongoDB');
+        } catch (e) {
+          console.warn('[smtpStore] no se pudo migrar config a MongoDB:', e.message);
+        }
+      }
+    }
+    return true;
+  } catch (e) {
+    console.warn('[smtpStore] Mongo init failed, fallback a archivo:', e.message);
+    SmtpConfigModel = null;
+    mongoReady = false;
+    return false;
+  }
+}
+
+async function saveConfig(input) {
   const sanitized = {
     provider: 'resend',
     fromEmail: String(input.fromEmail || '').trim(),
@@ -68,8 +130,23 @@ function saveConfig(input) {
   };
   if (!sanitized.fromEmail) throw new Error('fromEmail requerido');
   if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(sanitized.fromEmail)) throw new Error('fromEmail inválido');
-  const b64 = encrypt(sanitized);
-  fs.writeFileSync(DATA_FILE, b64, 'utf8');
+
+  if (mongoReady && SmtpConfigModel) {
+    await SmtpConfigModel.updateOne(
+      { key: MONGO_KEY },
+      { $set: { ...sanitized, key: MONGO_KEY } },
+      { upsert: true }
+    );
+  }
+
+  try {
+    ensureDir();
+    fs.writeFileSync(DATA_FILE, encrypt(sanitized), 'utf8');
+  } catch (e) {
+    if (!mongoReady) throw e;
+    console.warn('[smtpStore] file cache write failed (la config quedó en MongoDB):', e.message);
+  }
+
   cache = sanitized;
   return sanitized;
 }
@@ -80,4 +157,4 @@ function getPublicConfig() {
   return { ...cfg };
 }
 
-module.exports = { loadConfig, saveConfig, getPublicConfig };
+module.exports = { initDb, loadConfig, saveConfig, getPublicConfig };

@@ -14,10 +14,34 @@ function getDefaultFrom() {
   return process.env.RESEND_DEFAULT_FROM || '';
 }
 
-async function sendMail({ to, subject, body, fromOverride }) {
+function getDefaultName() {
+  return process.env.RESEND_DEFAULT_NAME || 'ControlPeso';
+}
+
+// Remitente efectivo: config guardada desde la app (Mongo/archivo) o, si no
+// hay ninguna, la env var de respaldo. Así el servidor siempre puede enviar.
+function getEffectiveSender() {
   const cfg = loadConfig();
-  if (!cfg) {
-    const e = new Error('Remitente no configurado');
+  if (cfg && cfg.fromEmail) {
+    return {
+      fromEmail: cfg.fromEmail,
+      fromName: cfg.fromName || getDefaultName(),
+      source: 'config',
+      updatedAt: cfg.updatedAt || null,
+    };
+  }
+  const envEmail = getDefaultFrom();
+  if (envEmail) {
+    return { fromEmail: envEmail, fromName: getDefaultName(), source: 'env', updatedAt: null };
+  }
+  return null;
+}
+
+async function sendMail({ to, subject, body, fromOverride }) {
+  const eff = getEffectiveSender();
+  const senderEmail = fromOverride || (eff && eff.fromEmail);
+  if (!senderEmail) {
+    const e = new Error('Remitente no configurado (guardá uno desde la app o setear RESEND_DEFAULT_FROM)');
     e.code = 'NO_SENDER_CONFIGURED';
     throw e;
   }
@@ -28,13 +52,7 @@ async function sendMail({ to, subject, body, fromOverride }) {
     throw e;
   }
 
-  const senderEmail = fromOverride || cfg.fromEmail || getDefaultFrom();
-  if (!senderEmail) {
-    const e = new Error('Falta fromEmail (configura en la app o RESEND_DEFAULT_FROM en el servidor)');
-    e.code = 'NO_FROM_ADDRESS';
-    throw e;
-  }
-  const fromName = cfg.fromName || 'ControlPeso';
+  const fromName = (eff && eff.fromName) || getDefaultName();
   const from = `"${fromName}" <${senderEmail}>`;
   console.log(`[mailer] sending from="${from}" to=${to} subject="${subject}"`);
 
@@ -81,4 +99,4 @@ function resetTransport() {
   resend = null;
 }
 
-module.exports = { sendMail, resetTransport };
+module.exports = { sendMail, resetTransport, getEffectiveSender };
