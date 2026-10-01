@@ -36,6 +36,10 @@ Servidor Node/Express para la app móvil **ControlPeso**. Realiza dos funciones:
 | `RESEND_API_KEY` | API key de Resend para enviar correos por HTTP. |
 | `RESEND_DEFAULT_FROM` | Remitente de respaldo. Se usa si la app aún no guardó config, así el servidor siempre puede enviar sin reconfigurar. |
 | `RESEND_DEFAULT_NAME` | Nombre del remitente de respaldo (default: `ControlPeso`). |
+| `APPT_TIMEZONE` | Zona horaria de la clínica para interpretar fecha/hora de citas y recordatorios (default `UTC`). Ej: `America/Argentina/Buenos_Aires`. |
+| `DEEPSEEK_API_KEY` | API key de DeepSeek para **Susam** (análisis IA). La clave vive solo en el servidor; la app llama a `/api/ai/evaluate`. |
+| `DEEPSEEK_MODEL` | Modelo de DeepSeek (default `deepseek-chat`). |
+| `DEEPSEEK_BASE_URL` | Endpoint base de DeepSeek (default `https://api.deepseek.com`). |
 
 ## Endpoints
 
@@ -49,6 +53,13 @@ Todos requieren `Authorization: Bearer <API_TOKEN>` excepto `/health`.
 | POST | `/api/smtp/config` | Guarda la configuración SMTP (cifrada) |
 | POST | `/api/smtp/test` | Envía un correo de prueba a un email dado |
 | POST | `/api/send-appointment-email` | Envía el correo de recordatorio (usa Idempotency-Key opcional) |
+
+### Susam (IA con DeepSeek)
+| Método | Ruta | Descripción |
+|---|---|---|
+| POST | `/api/ai/evaluate` | Recibe `{ patient, metrics, recommendations }`, construye el prompt profesional y llama a DeepSeek. Devuelve `{ ok, content, model, usage }`. Requiere `DEEPSEEK_API_KEY`. Rate limit: 6/min. |
+
+Flujo: la app (botón **Susam** en el resumen del paciente) envía todos los datos del paciente → el servidor arma el prompt → DeepSeek analiza → la app muestra el resultado y el médico puede guardarlo en `patient.analyses[]` (se sincroniza con el resto de los datos).
 
 ### Sync (datos por dispositivo)
 | Método | Ruta | Descripción |

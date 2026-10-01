@@ -52,6 +52,8 @@ async function attachNotify(patients, deviceId) {
               push1h: st.push1h || null,
               email1d: st.email1d || null,
               email1h: st.email1h || null,
+              pushAt: st.pushAt || null,
+              emailAt: st.emailAt || null,
             }
           : null;
       }

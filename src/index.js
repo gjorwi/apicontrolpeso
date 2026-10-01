@@ -4,6 +4,7 @@ const cors = require('cors');
 const emailRoutes = require('./routes/email');
 const syncRoutes = require('./routes/sync');
 const deviceRoutes = require('./routes/devices');
+const aiRoutes = require('./routes/ai');
 const syncStore = require('./services/syncStore');
 const deviceStore = require('./services/deviceStore');
 const notificationStore = require('./services/notificationStore');
@@ -33,6 +34,7 @@ app.get('/health', (req, res) => {
 app.use('/api/smtp', emailRoutes);
 app.use('/api/sync', syncRoutes);
 app.use('/api/devices', deviceRoutes);
+app.use('/api/ai', aiRoutes);
 
 app.use((req, res) => {
   console.log(`[404] ${req.method} ${req.originalUrl}`);

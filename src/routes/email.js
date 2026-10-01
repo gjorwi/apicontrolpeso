@@ -15,6 +15,23 @@ function buildAppointmentEmail(appointment, patient, kind = '1d') {
   const dateLabel = isNaN(date.getTime())
     ? dateISO
     : date.toLocaleDateString('es-ES', { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' });
+
+  if (kind === 'at') {
+    // Recordatorio creado por el médico: solo su mensaje + fecha/hora.
+    const message = String(appointment.message || '').trim();
+    return {
+      subject: `Recordatorio - ${dateLabel} ${time}`,
+      body: `Hola ${patient?.name || ''},
+
+${message || 'Te recordamos el recordatorio programado.'}
+
+Fecha: ${dateLabel}
+Hora: ${time}
+
+Saludos cordiales.`,
+    };
+  }
+
   const typeLabel = 'Control de peso y aplicación de inyección';
   const medName = patient?.injectionMed ? patient.injectionMed : null;
   const medLine = medName ? `\nMedicamento: ${medName}` : '';
@@ -192,7 +209,7 @@ router.post('/send-appointment-email', requireAuth, idempotencyStore(), rateLimi
 
 router.post('/retry-appointment-email', requireAuth, rateLimit({ max: 30 }), async (req, res) => {
   const { deviceId, patientId, appointmentId, kind, smtpConfig } = req.body || {};
-  const emailKind = kind === '1h' ? '1h' : '1d';
+  const emailKind = kind === '1h' ? '1h' : kind === 'at' ? 'at' : '1d';
   if (!deviceId || !patientId || !appointmentId) {
     return res.status(400).json({ error: 'INVALID_BODY', message: 'Falta deviceId, patientId o appointmentId.' });
   }
@@ -211,7 +228,7 @@ router.post('/retry-appointment-email', requireAuth, rateLimit({ max: 30 }), asy
     return res.status(404).json({ error: 'NO_APPOINTMENT', message: 'Cita no encontrada.' });
   }
 
-  const field = emailKind === '1h' ? 'email1h' : 'email1d';
+  const field = emailKind === '1h' ? 'email1h' : emailKind === 'at' ? 'emailAt' : 'email1d';
   const now = new Date().toISOString();
   const setState = (patch) =>
     notificationStore.setState(deviceId, appointmentId, { patientId, [field]: patch });

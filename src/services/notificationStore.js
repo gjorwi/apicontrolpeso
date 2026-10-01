@@ -23,6 +23,11 @@ async function initDb() {
         push1h: { type: mongoose.Schema.Types.Mixed, default: null },
         email1d: { type: mongoose.Schema.Types.Mixed, default: null },
         email1h: { type: mongoose.Schema.Types.Mixed, default: null },
+        pushAt: { type: mongoose.Schema.Types.Mixed, default: null },
+        emailAt: { type: mongoose.Schema.Types.Mixed, default: null },
+        // Firma (fecha|hora|mensaje) de la última versión procesada de la cita:
+        // si cambia (el médico la reprogramó), se resetea el estado de pushAt/emailAt.
+        sig: { type: String, default: '' },
         updatedAt: { type: String, default: '' },
       },
       { collection: 'notification_states', minimize: false }

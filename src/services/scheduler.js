@@ -106,6 +106,15 @@ function buildPushPayload({ patient, appointment, kind }) {
     ? dateISO
     : date.toLocaleDateString('es-ES', { weekday: 'long', day: 'numeric', month: 'long' });
   const label = patient?.name || 'tu paciente';
+  if (kind === 'at') {
+    // Recordatorio: mensaje definido por el médico, enviado a la hora exacta.
+    const message = String(appointment.message || '').trim();
+    return {
+      title: `Recordatorio: ${label}`,
+      body: message || `Recordatorio programado a las ${time}.`,
+      data: { type: 'appointment_reminder', kind, patientId: patient.id, appointmentId: appointment.id },
+    };
+  }
   if (kind === '1d') {
     return {
       title: `Cita mañana: ${label}`,
@@ -134,6 +143,22 @@ function buildEmailPayload({ patient, appointment, kind = '1d' }) {
   const dateLabel = isNaN(date.getTime())
     ? dateISO
     : date.toLocaleDateString('es-ES', { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' });
+
+  if (kind === 'at') {
+    // Recordatorio: solo el mensaje del médico + fecha/hora.
+    const message = String(appointment.message || '').trim();
+    const subject = `Recordatorio - ${dateLabel} ${time}`;
+    const body = `Hola ${patient?.name || ''},
+
+${message || 'Te recordamos el recordatorio programado.'}
+
+Fecha: ${dateLabel}
+Hora: ${time}
+
+Saludos cordiales.`;
+    return { subject, body };
+  }
+
   const typeLabel = 'Control de peso y aplicación de inyección';
   const medName = patient?.injectionMed ? patient.injectionMed : null;
   const medLine = medName ? `\nMedicamento: ${medName}` : '';
@@ -163,6 +188,9 @@ Saludos cordiales.`;
 
 const MIN_HOURS_FOR_1D_REMINDER = 12;
 const MIN_MINUTES_FOR_1H_REMINDER = 5;
+// Recordatorios: se envían a la hora exacta; si el servidor estuvo caído,
+// se tolera un retraso de hasta 6 horas antes de marcarlos como 'too_late'.
+const RECORDATORIO_LATE_TOLERANCE_MS = 6 * 60 * 60 * 1000;
 const MAX_EMAIL_ATTEMPTS = 5;
 const MAX_PUSH_ATTEMPTS = 10;
 const EMAIL_BACKOFF_MIN = [5, 30, 120, 720, 1440];
@@ -247,12 +275,57 @@ async function tryPush(field, kind, cur, ctx) {
   return failed;
 }
 
+async function processRecordatorio(deviceId, patient, appointment, device, apptTime) {
+  const ctx = { deviceId, device, patient, appointment };
+  const raw = (await notificationStore.getState(deviceId, appointment.id)) || {};
+  // Si el médico reprogramó el recordatorio (fecha/hora/mensaje), el estado
+  // previo deja de ser válido: se resetea para que vuelva a enviarse en el
+  // nuevo horario.
+  const sig = `${appointment.date}|${appointment.time || ''}|${appointment.message || ''}`;
+  const reprogrammed = (raw.sig || '') !== sig;
+  const stored = reprogrammed ? {} : raw;
+  const enablePush = appointment.notificationsEnabled !== false;
+  const enableEmail = appointment.sendEmail !== false;
+  if (!enablePush && !enableEmail) return;
+
+  const now = new Date();
+  const msSince = now.getTime() - apptTime.getTime();
+  const inWindow = msSince >= 0 && msSince <= RECORDATORIO_LATE_TOLERANCE_MS;
+  const tooLate = msSince > RECORDATORIO_LATE_TOLERANCE_MS;
+
+  const decide = async (field, existing, sendFn) => {
+    if (!inWindow) {
+      if (tooLate && !existing) {
+        return { status: 'skipped', at: nowISO(), attempts: 0, error: 'too_late', gaveUp: true, nextRetryAt: null };
+      }
+      return existing || null;
+    }
+    if (!shouldSend(existing)) return existing || null;
+    return sendFn(field, 'at', existing, ctx);
+  };
+
+  const patch = { patientId: patient.id, sig };
+  if (enablePush) patch.pushAt = await decide('pushAt', stored.pushAt, tryPush);
+  if (enableEmail) patch.emailAt = await decide('emailAt', stored.emailAt, tryEmail);
+  await notificationStore.setState(deviceId, appointment.id, patch);
+
+  console.log(
+    `[scheduler] recordatorio device=${deviceId} appt=${appointment.id} inWindow=${inWindow} tooLate=${tooLate} pAt=${patch.pushAt?.status || '-'} eAt=${patch.emailAt?.status || '-'}`
+  );
+}
+
 async function processAppointment(deviceId, patient, appointment, device) {
   if (!appointment || appointment.status !== 'pending') return;
   if (!patient?.email && !device?.pushToken) return;
 
   const apptTime = buildApptDateTime(appointment);
   if (!apptTime) return;
+
+  if (appointment.kind === 'recordatorio') {
+    await processRecordatorio(deviceId, patient, appointment, device, apptTime);
+    return;
+  }
+
   const now = new Date();
   if (apptTime.getTime() <= now.getTime()) return;
 
