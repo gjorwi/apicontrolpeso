@@ -41,8 +41,100 @@ function getFetch() {
   try { return require('node-fetch'); } catch (_) { return null; }
 }
 
+const arr = (v) => (Array.isArray(v) ? v : []);
+
+// Copia "clínica" del paciente: solo campos relevantes para el análisis.
+// El cliente ya sanea, pero el body no es confiable, así que se vuelve a
+// filtrar aquí (defensa en profundidad). Descarta datos de sistema
+// (notificationIds, notify, emailStatus…), datos de contacto y archives
+// analíticos viejos que podrían mencionar registros ya eliminados.
+function sanitizePatientForAi(patient) {
+  if (!patient || typeof patient !== 'object' || !patient.id) return null;
+
+  const recentAnalyses = arr(patient.analyses)
+    .slice()
+    .sort((a, b) => String(b.createdAt || '').localeCompare(String(a.createdAt || '')))
+    .slice(0, 3)
+    .map((a) => ({
+      createdAt: a.createdAt || null,
+      summary: String(a.summary || '').slice(0, 300),
+      content: String(a.content || '').slice(0, 3000),
+    }));
+
+  return {
+    id: patient.id,
+    name: patient.name || '',
+    sex: patient.sex ?? null,
+    age: patient.age ?? null,
+    heightCm: patient.heightCm ?? null,
+    initialWeightKg: patient.initialWeightKg ?? null,
+    goalWeightKg: patient.goalWeightKg ?? null,
+    injectionMed: patient.injectionMed || null,
+    measurements: arr(patient.measurements).map((m) => ({
+      date: m.date || null,
+      weightKg: m.weightKg ?? null,
+      heightCm: m.heightCm ?? null,
+      goalWeightKg: m.goalWeightKg ?? null,
+      waistCm: m.waistCm ?? null,
+      wristCm: m.wristCm ?? null,
+      hipCm: m.hipCm ?? null,
+      bustCm: m.bustCm ?? null,
+      rightArmCm: m.rightArmCm ?? null,
+      leftArmCm: m.leftArmCm ?? null,
+      rightThighCm: m.rightThighCm ?? null,
+      leftThighCm: m.leftThighCm ?? null,
+      rightCalfCm: m.rightCalfCm ?? null,
+      leftCalfCm: m.leftCalfCm ?? null,
+      bpSystolic: m.bpSystolic ?? null,
+      bpDiastolic: m.bpDiastolic ?? null,
+      heartRate: m.heartRate ?? null,
+      temperature: m.temperature ?? null,
+      spo2: m.spo2 ?? null,
+      glucose: m.glucose ?? null,
+      notes: m.notes || '',
+    })),
+    injections: arr(patient.injections).map((i) => ({
+      date: i.date || null,
+      dose: i.dose || '',
+      site: i.site || '',
+      notes: i.notes || '',
+      doseIncreased: !!i.doseIncreased,
+    })),
+    medications: arr(patient.medications).map((m) => ({
+      name: m.name || '',
+      dose: m.dose || '',
+      frequency: m.frequency || '',
+      startDate: m.startDate || null,
+      endDate: m.endDate || null,
+      active: m.active !== false,
+      reason: m.reason || '',
+      notes: m.notes || '',
+      changeHistory: arr(m.changeHistory).map((c) => ({
+        date: c.date || null,
+        type: c.type || null,
+        previousDose: c.previousDose || null,
+        newDose: c.newDose || null,
+        reason: c.reason || '',
+      })),
+    })),
+    appointments: arr(patient.appointments).map((a) => ({
+      kind: a.kind || 'cita',
+      date: a.date || null,
+      time: a.time || null,
+      status: a.status || 'pending',
+      notes: a.notes || '',
+      message: a.message || '',
+    })),
+    analyses: recentAnalyses,
+  };
+}
+
 function buildUserPrompt({ patient, metrics, recommendations }) {
-  const payload = { paciente: patient, metricas_calculadas: metrics, recomendaciones_actuales: recommendations };
+  const payload = {
+    paciente: sanitizePatientForAi(patient) || {},
+    metricas_calculadas: metrics,
+    recomendaciones_actuales: recommendations,
+  };
   return `Evaluá al siguiente paciente con TODOS sus datos.\n\n${JSON.stringify(payload, null, 2)}`;
 }
 
@@ -130,3 +222,5 @@ router.post('/evaluate', requireAuth, rateLimit({ max: 6 }), async (req, res) =>
 });
 
 module.exports = router;
+// Exportado para pruebas.
+module.exports.sanitizePatientForAi = sanitizePatientForAi;

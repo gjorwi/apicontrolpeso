@@ -2,6 +2,7 @@ const syncStore = require('./syncStore');
 const deviceStore = require('./deviceStore');
 const notificationStore = require('./notificationStore');
 const pushService = require('./pushService');
+const reminderEngine = require('./reminderEngine');
 const { sendMail, getEffectiveSender } = require('./mailer');
 
 let intervalHandle = null;
@@ -222,13 +223,15 @@ async function tryEmail(field, kind, cur, ctx) {
   if (process.env.MOCK_MAIL === 'true' || !getEffectiveSender()) {
     return { status: 'skipped', at: nowISO(), attempts: cur?.attempts || 0, error: 'smtp_not_configured' };
   }
-  const claimed = await notificationStore.claimAction(deviceId, appointment.id, field);
+  const claimed = await notificationStore.claimAction(deviceId, ctx.ref, field);
   if (!claimed) {
     return CLAIM_LOST;
   }
   let attempts = cur?.attempts || 0;
   try {
-    const { subject, body } = buildEmailPayload({ patient, appointment, kind });
+    const { subject, body } = ctx.buildEmail
+      ? ctx.buildEmail()
+      : buildEmailPayload({ patient, appointment, kind });
     const info = await sendMail({ to: patient.email, subject, body });
     return { status: 'sent', at: nowISO(), attempts: 0, messageId: info.messageId || null, error: null, nextRetryAt: null, gaveUp: false };
   } catch (e) {
@@ -241,7 +244,7 @@ async function tryEmail(field, kind, cur, ctx) {
       failed.gaveUp = false;
       failed.nextRetryAt = retryAfter(attempts, EMAIL_BACKOFF_MIN);
     }
-    console.error(`[scheduler] email fail device=${deviceId} appt=${appointment.id} kind=${kind} err=${e.message}`);
+    console.error(`[scheduler] email fail device=${deviceId} ref=${ctx.ref} kind=${kind} err=${e.message}`);
     return failed;
   }
 }
@@ -251,13 +254,14 @@ async function tryPush(field, kind, cur, ctx) {
   if (!device.pushToken) {
     return { status: 'skipped', at: nowISO(), attempts: 0, error: 'NO_TOKEN' };
   }
-  const claimed = await notificationStore.claimAction(deviceId, appointment.id, field);
+  const claimed = await notificationStore.claimAction(deviceId, ctx.ref, field);
   if (!claimed) {
     return CLAIM_LOST;
   }
+  const payload = ctx.payload || buildPushPayload({ patient, appointment, kind });
   const res = await pushService.sendPush({
     token: device.pushToken,
-    ...buildPushPayload({ patient, appointment, kind }),
+    ...payload,
   });
   if (res.ok) {
     return { status: 'sent', at: nowISO(), attempts: 0, error: null, nextRetryAt: null, gaveUp: false };
@@ -271,12 +275,12 @@ async function tryPush(field, kind, cur, ctx) {
     failed.gaveUp = false;
     failed.nextRetryAt = retryAfter(attempts, PUSH_BACKOFF_MIN);
   }
-  console.error(`[scheduler] push fail device=${deviceId} appt=${appointment.id} kind=${kind} err=${failed.error}`);
+  console.error(`[scheduler] push fail device=${deviceId} ref=${ctx.ref} kind=${kind} err=${failed.error}`);
   return failed;
 }
 
 async function processRecordatorio(deviceId, patient, appointment, device, apptTime) {
-  const ctx = { deviceId, device, patient, appointment };
+  const ctx = { deviceId, device, patient, appointment, ref: appointment.id };
   const raw = (await notificationStore.getState(deviceId, appointment.id)) || {};
   // Si el médico reprogramó el recordatorio (fecha/hora/mensaje), el estado
   // previo deja de ser válido: se resetea para que vuelva a enviarse en el
@@ -341,7 +345,7 @@ async function processAppointment(deviceId, patient, appointment, device) {
   const oneHourBefore = new Date(apptTime.getTime() - 60 * 60 * 1000);
   const in1hWindow = now.getTime() >= oneHourBefore.getTime() && minutesUntilAppt >= MIN_MINUTES_FOR_1H_REMINDER;
 
-  const ctx = { deviceId, device, patient, appointment };
+  const ctx = { deviceId, device, patient, appointment, ref: appointment.id };
   const stored = (await notificationStore.getState(deviceId, appointment.id)) || {};
 
   const decide = async (field, kind, existing, inWindow, sendFn) => {
@@ -368,12 +372,150 @@ async function processAppointment(deviceId, patient, appointment, device) {
   );
 }
 
+// Fecha 'YYYY-MM-DD' (hora de pared) de un instante en APPT_TIMEZONE.
+function wallDateStr(date) {
+  try {
+    const fmt = new Intl.DateTimeFormat('en-CA', {
+      timeZone: APPT_TIMEZONE,
+      year: 'numeric', month: '2-digit', day: '2-digit',
+    });
+    return fmt.format(date);
+  } catch (e) {
+    return date.toISOString().slice(0, 10);
+  }
+}
+
+function dateLabelLong(dateStr) {
+  const date = new Date(String(dateStr) + 'T00:00:00');
+  return isNaN(date.getTime())
+    ? String(dateStr)
+    : date.toLocaleDateString('es-ES', { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' });
+}
+
+// Texto del recordatorio: mensaje propio del médico o default
+// ("Es hora de tomar {medicamento} de {dosis}").
+function medReminderMessage(reminder, medication) {
+  const custom = String(reminder?.message || '').trim();
+  if (custom) return custom;
+  const name = medication?.name || 'tu medicamento';
+  const dose = medication?.dose ? ` de ${medication.dose}` : '';
+  return `Es hora de tomar ${name}${dose}`;
+}
+
+// Push para el médico: le avisa que al paciente le toca tomar el medicamento.
+function buildMedPushPayload({ patient, medication, reminder, dateStr, time }) {
+  const who = patient?.name || 'tu paciente';
+  const message = medReminderMessage(reminder, medication);
+  return {
+    title: `Recordatorio de toma: ${who}`,
+    body: `${message} — ${time}. Revisá la toma del paciente.`,
+    data: {
+      type: 'medication_reminder',
+      patientId: patient.id,
+      medicationId: medication.id,
+      reminderId: reminder.id,
+      date: dateStr,
+      time,
+    },
+  };
+}
+
+// Email para el paciente: su recordatorio personal de toma.
+function buildMedEmailPayload({ patient, medication, reminder, dateStr, time }) {
+  const med = medication?.name || 'tu medicamento';
+  const dose = medication?.dose ? `\n- Dosis: ${medication.dose}` : '';
+  const reason = medication?.reason ? `\n- Indicación: ${medication.reason}` : '';
+  const notes = medication?.notes ? `\n- Notas: ${medication.notes}` : '';
+  const message = medReminderMessage(reminder, medication);
+  const subject = message;
+  const body = `Hola ${patient?.name || ''},
+
+${message}
+
+- Medicamento: ${med}${dose}${reason}${notes}
+- Hora: ${time}
+- Fecha: ${dateLabelLong(dateStr)}
+
+Tómalo siguiendo las indicaciones de tu médico.
+
+Saludos cordiales.`;
+  return { subject, body };
+}
+
+async function processMedReminder(deviceId, patient, medication, reminder, device) {
+  if (!medication || medication.active === false) return;
+  if (!reminder || reminder.active === false) return;
+  if (!patient?.email && !device?.pushToken) return;
+
+  const now = new Date();
+  const dateStr = wallDateStr(now);
+  const times = reminderEngine.occurrencesOn(reminder, dateStr);
+  if (!times.length) return;
+
+  // "Hourly" puede tener varias ocurrencias en el mismo día: cada una
+  // se procesa con su propia clave de estado (fecha + hora).
+  for (const time of times) {
+    await processMedOccurrence({ deviceId, patient, medication, reminder, device, dateStr, time, now });
+  }
+}
+
+async function processMedOccurrence({ deviceId, patient, medication, reminder, device, dateStr, time, now }) {
+  const dm = dateStr.match(/^(\d{4})-(\d{2})-(\d{2})/);
+  const tm = time.match(/^(\d{1,2}):(\d{2})/);
+  if (!dm || !tm) return;
+  const ms = wallToUtc(APPT_TIMEZONE, Number(dm[1]), Number(dm[2]) - 1, Number(dm[3]), Number(tm[1]), Number(tm[2]));
+  if (isNaN(ms)) return;
+
+  const msSince = now.getTime() - ms;
+  const inWindow = msSince >= 0 && msSince <= RECORDATORIO_LATE_TOLERANCE_MS;
+  const tooLate = msSince > RECORDATORIO_LATE_TOLERANCE_MS;
+
+  // Clave por ocurrencia (fecha+hora): editar el recordatorio genera otra
+  // clave, por lo que no hace falta un "sig" para resetear el estado.
+  const stateKey = `med_${reminder.id}_${dateStr}_${tm[1].padStart(2, '0')}${tm[2]}`;
+  const ctx = {
+    deviceId,
+    device,
+    patient,
+    appointment: null,
+    ref: stateKey,
+    payload: buildMedPushPayload({ patient, medication, reminder, dateStr, time }),
+    buildEmail: () => buildMedEmailPayload({ patient, medication, reminder, dateStr, time }),
+  };
+  const stored = (await notificationStore.getState(deviceId, stateKey)) || {};
+
+  const decide = async (field, existing, sendFn) => {
+    if (!inWindow) {
+      if (tooLate && !existing) {
+        return { status: 'skipped', at: nowISO(), attempts: 0, error: 'too_late', gaveUp: true, nextRetryAt: null };
+      }
+      return existing || null;
+    }
+    if (!shouldSend(existing)) return existing || null;
+    return sendFn(field, 'at', existing, ctx);
+  };
+
+  const patch = { patientId: patient.id };
+  if (reminder.sendPush !== false) patch.pushAt = await decide('pushAt', stored.pushAt, tryPush);
+  if (reminder.sendEmail !== false) patch.emailAt = await decide('emailAt', stored.emailAt, tryEmail);
+  // No persistir si no hubo acción ni estado previo (p. ej. ocurrencias
+  // futuras del mismo día en frecuencias "por horas").
+  if (patch.pushAt || patch.emailAt) {
+    await notificationStore.setState(deviceId, stateKey, patch);
+  }
+
+  console.log(
+    `[scheduler] medReminder device=${deviceId} med=${medication.id} rem=${reminder.id} ${dateStr} ${time} inWindow=${inWindow} tooLate=${tooLate} pAt=${patch.pushAt?.status || '-'} eAt=${patch.emailAt?.status || '-'}`
+  );
+}
+
 async function tick() {
   if (running) return { skipped: 'already_running' };
   running = true;
   const startedAt = Date.now();
   let devicesProcessed = 0;
   let apptsProcessed = 0;
+  let medRemindersProcessed = 0;
   try {
     const devices = await deviceStore.listAllDevices();
     for (const device of devices) {
@@ -387,12 +529,20 @@ async function tick() {
           await processAppointment(device.deviceId, patient, appt, device);
           apptsProcessed++;
         }
+        const meds = Array.isArray(patient.medications) ? patient.medications : [];
+        for (const med of meds) {
+          const reminders = Array.isArray(med.reminders) ? med.reminders : [];
+          for (const rem of reminders) {
+            await processMedReminder(device.deviceId, patient, med, rem, device);
+            medRemindersProcessed++;
+          }
+        }
       }
     }
     lastTickAt = Date.now();
     const ms = lastTickAt - startedAt;
-    console.log(`[scheduler] tick devices=${devicesProcessed} appts=${apptsProcessed} in ${ms}ms`);
-    return { devices: devicesProcessed, appts: apptsProcessed, ms };
+    console.log(`[scheduler] tick devices=${devicesProcessed} appts=${apptsProcessed} medReminders=${medRemindersProcessed} in ${ms}ms`);
+    return { devices: devicesProcessed, appts: apptsProcessed, medReminders: medRemindersProcessed, ms };
   } catch (e) {
     console.error('[scheduler] tick FAIL:', e?.message);
     return { error: e.message };
