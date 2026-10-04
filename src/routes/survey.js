@@ -215,7 +215,10 @@ router.get('/pending', requireAuth, async (req, res) => {
 router.get('/patients/:patientId', requireAuth, async (req, res) => {
   try {
     const deviceId = typeof req.query.deviceId === 'string' ? req.query.deviceId : undefined;
-    const report = await surveyJobs.getPatientReport(req.params.patientId, deviceId);
+    const date = typeof req.query.date === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(req.query.date)
+      ? req.query.date
+      : undefined;
+    const report = await surveyJobs.getPatientReport(req.params.patientId, deviceId, date);
     return res.json({ ok: true, ...report });
   } catch (e) {
     console.error('[survey] patient report FAIL:', e.message);

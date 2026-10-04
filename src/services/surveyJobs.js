@@ -364,20 +364,30 @@ async function run(now = new Date()) {
 
 // ------------------------------------------------------------- reportes
 
-async function getPatientReport(patientId, deviceId) {
+async function getPatientReport(patientId, deviceId, date) {
   const found = await findPatient(patientId, deviceId);
-  const [invites, responses] = await Promise.all([
-    surveyStore.listInvites({ patientId, limit: 100 }),
-    surveyStore.listResponses({ patientId, limit: 100 }),
+  const [allInvites, allResponses] = await Promise.all([
+    surveyStore.listInvites({ patientId, limit: 200 }),
+    surveyStore.listResponses({ patientId, limit: 200 }),
   ]);
+  // date opcional: si llega, filtra invites/responses por ese día y, además,
+  // expone `availableDates` con todas las fechas que tienen algo (para que la
+  // app pueda construir un selector de historial).
+  const invites = date ? allInvites.filter((i) => i.date === date) : allInvites;
+  const responses = date ? allResponses.filter((r) => r.date === date) : allResponses;
   invites.sort((a, b) => String(b.date || '').localeCompare(String(a.date || '')));
   responses.sort((a, b) => String(b.date || '').localeCompare(String(a.date || '')));
+  const availableDates = Array.from(
+    new Set([...allInvites.map((i) => i.date), ...allResponses.map((r) => r.date)].filter(Boolean))
+  ).sort((a, b) => b.localeCompare(a));
   return {
     patient: found
       ? { id: found.patient.id, name: found.patient.name || '', email: found.patient.email || '', deviceId: found.deviceId }
       : { id: patientId, name: '', email: '', deviceId: deviceId || '' },
     invites,
     responses,
+    availableDates,
+    date: date || null,
   };
 }
 
