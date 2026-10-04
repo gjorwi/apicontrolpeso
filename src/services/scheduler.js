@@ -4,6 +4,9 @@ const notificationStore = require('./notificationStore');
 const pushService = require('./pushService');
 const reminderEngine = require('./reminderEngine');
 const { sendMail, getEffectiveSender } = require('./mailer');
+const { APPT_TIMEZONE, pad2, wallToUtc, wallDateStr, dateLabelLong } = require('./wallTime');
+const surveyJobs = require('./surveyJobs');
+const { retryPendingEvaluations } = require('./surveyEvaluate');
 
 let intervalHandle = null;
 let running = false;
@@ -11,52 +14,6 @@ let lastTickAt = 0;
 
 const TICK_MS = Number(process.env.SCHEDULER_TICK_MS) || 60000;
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
-
-// Zona horaria de la clínica. La app guarda fecha/hora en hora local del
-// dispositivo (sin zona), así que necesitamos saber dónde interpretarlas.
-// Si no se configura, se asume UTC para no cambiar el comportamiento previo.
-const APPT_TIMEZONE = process.env.APPT_TIMEZONE || 'UTC';
-
-function pad2(n) {
-  return String(n).padStart(2, '0');
-}
-
-// Convierte una hora "de pared" local (y,mes0,d,h,min) al instante UTC real
-// teniendo en cuenta la zona horaria (y DST) configurada en APPT_TIMEZONE.
-function wallToUtc(tz, y, m0, d, hh, mm) {
-  const wallMs = Date.UTC(y, m0, d, hh, mm);
-  if (!tz || tz === 'UTC' || tz === 'Etc/UTC') return wallMs;
-  let utcGuess = wallMs;
-  try {
-    const fmt = new Intl.DateTimeFormat('en-US', {
-      timeZone: tz,
-      hour12: false,
-      year: 'numeric', month: '2-digit', day: '2-digit',
-      hour: '2-digit', minute: '2-digit', second: '2-digit',
-    });
-    for (let i = 0; i < 3; i++) {
-      const parts = fmt.formatToParts(new Date(utcGuess));
-      const map = {};
-      for (const p of parts) map[p.type] = p.value;
-      const guessWall = Date.UTC(
-        Number(map.year), Number(map.month) - 1, Number(map.day),
-        Number(map.hour) % 24, Number(map.minute)
-      );
-      const delta = guessWall - utcGuess;
-      utcGuess = wallMs - delta;
-    }
-    const parts = fmt.formatToParts(new Date(utcGuess));
-    const map = {};
-    for (const p of parts) map[p.type] = p.value;
-    const back = Date.UTC(
-      Number(map.year), Number(map.month) - 1, Number(map.day),
-      Number(map.hour) % 24, Number(map.minute)
-    );
-    return Math.abs(back - wallMs) <= 3600000 ? utcGuess : wallMs;
-  } catch (e) {
-    return wallMs;
-  }
-}
 
 function buildApptDateTime(appointment) {
   if (!appointment?.date) return null;
@@ -372,26 +329,6 @@ async function processAppointment(deviceId, patient, appointment, device) {
   );
 }
 
-// Fecha 'YYYY-MM-DD' (hora de pared) de un instante en APPT_TIMEZONE.
-function wallDateStr(date) {
-  try {
-    const fmt = new Intl.DateTimeFormat('en-CA', {
-      timeZone: APPT_TIMEZONE,
-      year: 'numeric', month: '2-digit', day: '2-digit',
-    });
-    return fmt.format(date);
-  } catch (e) {
-    return date.toISOString().slice(0, 10);
-  }
-}
-
-function dateLabelLong(dateStr) {
-  const date = new Date(String(dateStr) + 'T00:00:00');
-  return isNaN(date.getTime())
-    ? String(dateStr)
-    : date.toLocaleDateString('es-ES', { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' });
-}
-
 // Texto del recordatorio: mensaje propio del médico o default
 // ("Es hora de tomar {medicamento} de {dosis}").
 function medReminderMessage(reminder, medication) {
@@ -516,6 +453,7 @@ async function tick() {
   let devicesProcessed = 0;
   let apptsProcessed = 0;
   let medRemindersProcessed = 0;
+  let surveyResult = null;
   try {
     const devices = await deviceStore.listAllDevices();
     for (const device of devices) {
@@ -539,10 +477,26 @@ async function tick() {
         }
       }
     }
+    // Encuestas de seguimiento (envío L/M/V + digest de pendientes).
+    try {
+      surveyResult = await surveyJobs.run(new Date());
+    } catch (e) {
+      console.error('[scheduler] survey job FAIL:', e?.message);
+    }
+
+    // Evaluaciones IA que quedaron pendientes (el proceso se cayó durante la
+    // llamada a DeepSeek). Pocas por tick; no hace nada sin DEEPSEEK_API_KEY.
+    try {
+      const aiRetry = await retryPendingEvaluations();
+      if (aiRetry?.retried) surveyResult = { ...(surveyResult || {}), aiRetry: aiRetry.retried };
+    } catch (e) {
+      console.error('[scheduler] survey ai retry FAIL:', e?.message);
+    }
+
     lastTickAt = Date.now();
     const ms = lastTickAt - startedAt;
     console.log(`[scheduler] tick devices=${devicesProcessed} appts=${apptsProcessed} medReminders=${medRemindersProcessed} in ${ms}ms`);
-    return { devices: devicesProcessed, appts: apptsProcessed, medReminders: medRemindersProcessed, ms };
+    return { devices: devicesProcessed, appts: apptsProcessed, medReminders: medRemindersProcessed, survey: surveyResult, ms };
   } catch (e) {
     console.error('[scheduler] tick FAIL:', e?.message);
     return { error: e.message };

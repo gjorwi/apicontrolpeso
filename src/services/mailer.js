@@ -37,7 +37,7 @@ function getEffectiveSender() {
   return null;
 }
 
-async function sendMail({ to, subject, body, fromOverride }) {
+async function sendMail({ to, subject, body, html, fromOverride }) {
   const eff = getEffectiveSender();
   const senderEmail = fromOverride || (eff && eff.fromEmail);
   if (!senderEmail) {
@@ -57,17 +57,21 @@ async function sendMail({ to, subject, body, fromOverride }) {
   console.log(`[mailer] sending from="${from}" to=${to} subject="${subject}"`);
 
   if (process.env.MOCK_MAIL === 'true') {
-    console.log(`[mock-mail][resend] to=${to} subject="${subject}" body_len=${body?.length || 0}`);
+    console.log(`[mock-mail][resend] to=${to} subject="${subject}" body_len=${body?.length || 0} html=${html ? 'yes' : 'no'}`);
     return { messageId: 'mock-' + Date.now() };
   }
 
   try {
-    const result = await client.emails.send({
+    const payload = {
       from,
       to,
       subject,
       text: body,
-    });
+    };
+    // HTML opcional (correo de encuesta); el texto plano sigue siendo
+    // obligatorio para clientes que no renderizan HTML.
+    if (html && typeof html === 'string') payload.html = html;
+    const result = await client.emails.send(payload);
     if (result?.error) {
       const e = new Error(result.error.message || 'Resend rechazó el envío');
       e.code = classifyResendError(result.error);

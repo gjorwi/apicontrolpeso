@@ -31,3 +31,15 @@ services:
         value: Doctora Flor
       - key: EXPO_ACCESS_TOKEN
         sync: false
+      # URL pública de la app de encuesta (Next.js en Vercel). Base del link
+      # del correo: {SURVEY_BASE_URL}/responder?t=<token>. Obligatoria para
+      # que el envío automático/manual de encuestas funcione.
+      - key: SURVEY_BASE_URL
+        sync: false
+      # Susam (IA médica). Clave SOLO en servidor.
+      - key: DEEPSEEK_API_KEY
+        sync: false
+      - key: DEEPSEEK_MODEL
+        value: deepseek-chat
+      - key: DEEPSEEK_BASE_URL
+        value: https://api.deepseek.com

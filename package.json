@@ -2,7 +2,7 @@
   "name": "controlpeso-mailer-server",
   "version": "1.0.0",
   "private": true,
-  "description": "Mailer backend for ControlPeso (Express + Nodemailer).",
+  "description": "Backend de ControlPeso (Express + Resend + Mongoose + Expo Push).",
   "main": "src/index.js",
   "scripts": {
     "start": "node src/index.js",

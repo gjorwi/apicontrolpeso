@@ -5,10 +5,12 @@ const emailRoutes = require('./routes/email');
 const syncRoutes = require('./routes/sync');
 const deviceRoutes = require('./routes/devices');
 const aiRoutes = require('./routes/ai');
+const surveyRoutes = require('./routes/survey');
 const syncStore = require('./services/syncStore');
 const deviceStore = require('./services/deviceStore');
 const notificationStore = require('./services/notificationStore');
 const smtpStore = require('./services/smtpStore');
+const surveyStore = require('./services/surveyStore');
 const scheduler = require('./services/scheduler');
 
 const app = express();
@@ -35,6 +37,7 @@ app.use('/api/smtp', emailRoutes);
 app.use('/api/sync', syncRoutes);
 app.use('/api/devices', deviceRoutes);
 app.use('/api/ai', aiRoutes);
+app.use('/api/survey', surveyRoutes);
 
 app.use((req, res) => {
   console.log(`[404] ${req.method} ${req.originalUrl}`);
@@ -72,7 +75,13 @@ async function start() {
     const usedMongoSmtp = await smtpStore.initDb();
     console.log(`[db] smtp storage=${usedMongoSmtp ? 'MongoDB (Mongoose)' : 'archivo local (fallback)'}`);
   } catch (e) {
-    console.warn('[db] smtp init error, fallback archivo:', e.message);
+    console.warn('[db] smtp init error, fallback archivo JSON:', e.message);
+  }
+  try {
+    const usedMongoSurvey = await surveyStore.initDb();
+    console.log(`[db] survey storage=${usedMongoSurvey ? 'MongoDB (Mongoose)' : 'archivo JSON (fallback)'}`);
+  } catch (e) {
+    console.warn('[db] survey init error, fallback archivo JSON:', e.message);
   }
   const server = app.listen(port, '0.0.0.0', () => {
     console.log(`[server] listening on :${port} (env=${process.env.NODE_ENV || 'development'}, mock=${process.env.MOCK_MAIL === 'true'}) pid=${process.pid}`);
