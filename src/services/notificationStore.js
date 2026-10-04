@@ -106,6 +106,20 @@ async function getStatesForDevice(deviceId) {
     .map(([, v]) => v);
 }
 
+async function getAll() {
+  if (mongoReady && NotificationModel) {
+    const docs = await NotificationModel.find({}).lean();
+    return docs || [];
+  }
+  const all = fileRead();
+  return Object.values(all);
+}
+
+async function saveState(state) {
+  if (!state || !state.deviceId || !state.appointmentId) return;
+  await setState(state.deviceId, state.appointmentId, state);
+}
+
 async function deleteState(deviceId, appointmentId) {
   if (!deviceId || !appointmentId) return;
   if (mongoReady && NotificationModel) {
@@ -179,4 +193,4 @@ async function claimAction(deviceId, appointmentId, field) {
   return true;
 }
 
-module.exports = { initDb, getState, setState, getStatesForDevice, deleteState, claimAction };
+module.exports = { initDb, getState, setState, getStatesForDevice, deleteState, claimAction, getAll, saveState };

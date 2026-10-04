@@ -16,13 +16,8 @@ async function initDb() {
     }
     const schema = new mongoose.Schema(
       {
-        // Antes: deviceId era siempre la clave. Ahora:
-        //   - Snapshots "diario": deviceId = backupId (estable, multi-dispositivo).
-        //   - Snapshots "backup" : deviceId = `backup:${backupId}` (inmutables, separados).
-        // deviceIds[] mantiene la auditoría de qué dispositivos sincronizaron contra este snapshot.
         deviceId: { type: String, required: true, unique: true },
         backupId: { type: String, default: '', index: true, sparse: true },
-        deviceIds: { type: [String], default: [] },
         data: { type: mongoose.Schema.Types.Mixed, default: {} },
         ts: { type: String, default: '' },
       },
@@ -61,7 +56,6 @@ async function get(deviceId) {
     return {
       deviceId: doc.deviceId,
       backupId: doc.backupId || '',
-      deviceIds: doc.deviceIds || [],
       data: doc.data || {},
       ts: doc.ts || '',
     };
@@ -72,75 +66,30 @@ async function get(deviceId) {
   return {
     deviceId,
     backupId: entry.backupId || '',
-    deviceIds: entry.deviceIds || [],
     data: entry.data || {},
     ts: entry.ts || '',
   };
 }
 
-async function set(deviceId, { data, ts, backupId, deviceId: sourceDeviceId }) {
+async function set(deviceId, { data, ts, backupId }) {
   if (mongoReady && SnapshotModel) {
     const patch = { data: data || {}, ts: ts || '' };
     if (backupId !== undefined) patch.backupId = backupId;
-    if (sourceDeviceId) {
-      await SnapshotModel.updateOne(
-        { deviceId },
-        {
-          $set: patch,
-          $addToSet: { deviceIds: sourceDeviceId },
-        },
-        { upsert: true }
-      );
-    } else {
-      await SnapshotModel.updateOne(
-        { deviceId },
-        { $set: patch },
-        { upsert: true }
-      );
-    }
+    await SnapshotModel.updateOne(
+      { deviceId },
+      { $set: patch },
+      { upsert: true }
+    );
     return;
   }
   const all = fileRead() || {};
   const prev = all[deviceId] || {};
-  const deviceIds = Array.isArray(prev.deviceIds) ? prev.deviceIds.slice() : [];
-  if (sourceDeviceId && !deviceIds.includes(sourceDeviceId)) {
-    deviceIds.push(sourceDeviceId);
-  }
   all[deviceId] = {
     data: data || {},
     ts: ts || '',
     backupId: backupId !== undefined ? backupId : (prev.backupId || ''),
-    deviceIds,
   };
   fileWrite(all);
-}
-
-async function findByBackupId(backupId) {
-  if (!backupId) return null;
-  if (mongoReady && SnapshotModel) {
-    const doc = await SnapshotModel.findOne({ backupId }).lean();
-    if (!doc) return null;
-    return {
-      deviceId: doc.deviceId,
-      backupId: doc.backupId || '',
-      deviceIds: doc.deviceIds || [],
-      data: doc.data || {},
-      ts: doc.ts || '',
-    };
-  }
-  const all = fileRead() || {};
-  for (const [key, entry] of Object.entries(all)) {
-    if (entry && entry.backupId === backupId) {
-      return {
-        deviceId: key,
-        backupId: entry.backupId || '',
-        deviceIds: entry.deviceIds || [],
-        data: entry.data || {},
-        ts: entry.ts || '',
-      };
-    }
-  }
-  return null;
 }
 
 async function getAll() {
@@ -149,7 +98,6 @@ async function getAll() {
     return docs.map((d) => ({
       deviceId: d.deviceId,
       backupId: d.backupId || '',
-      deviceIds: d.deviceIds || [],
       data: d.data || {},
       ts: d.ts || '',
     }));
@@ -158,41 +106,48 @@ async function getAll() {
   return Object.entries(all).map(([deviceId, entry]) => ({
     deviceId,
     backupId: entry.backupId || '',
-    deviceIds: entry.deviceIds || [],
     data: entry.data || {},
     ts: entry.ts || '',
   }));
 }
 
-// ------------------------------------------------------------- snapshots de backup
-
-const BACKUP_PREFIX = 'backup:';
-const backupKey = (backupId) => `${BACKUP_PREFIX}${backupId}`;
-
-async function getBackup(backupId) {
-  if (!backupId) return null;
-  return get(backupKey(backupId));
+// Devuelve todos los snapshots cuyo campo backupId coincide con el valor.
+async function getByBackup(backupId) {
+  if (!backupId) return [];
+  if (mongoReady && SnapshotModel) {
+    const docs = await SnapshotModel.find({ backupId }).lean();
+    return docs.map((d) => ({
+      deviceId: d.deviceId,
+      backupId: d.backupId || '',
+      data: d.data || {},
+      ts: d.ts || '',
+    }));
+  }
+  const all = fileRead() || {};
+  return Object.entries(all)
+    .filter(([, entry]) => entry && entry.backupId === backupId)
+    .map(([deviceId, entry]) => ({
+      deviceId,
+      backupId: entry.backupId || '',
+      data: entry.data || {},
+      ts: entry.ts || '',
+    }));
 }
 
-async function setBackup(backupId, { data, ts, deviceId: sourceDeviceId }) {
-  if (!backupId) return;
-  return set(backupKey(backupId), { data, ts, deviceId: sourceDeviceId });
+// Etiqueta retroactivamente cualquier snapshot cuyo deviceId coincida con uno
+// de los deviceIds dados, asignándole el backupId si no lo tiene.
+async function tagByDeviceIds(deviceIds, backupId) {
+  if (!backupId || !Array.isArray(deviceIds) || !deviceIds.length) return { updated: 0 };
+  let updated = 0;
+  for (const deviceId of deviceIds) {
+    if (!deviceId) continue;
+    const prev = await get(deviceId);
+    if (!prev) continue;
+    if (prev.backupId === backupId) continue;
+    await set(deviceId, { data: prev.data, ts: prev.ts, backupId });
+    updated++;
+  }
+  return { updated };
 }
 
-// Cuenta cuántos snapshots hay sin backupId (huérfanos legacy).
-async function countOrphanSnapshots() {
-  const all = await getAll();
-  return all.filter((s) => !s.backupId && (s.data?.patients || []).length > 0).length;
-}
-
-module.exports = {
-  initDb,
-  get,
-  set,
-  findByBackupId,
-  getAll,
-  getBackup,
-  setBackup,
-  countOrphanSnapshots,
-  BACKUP_PREFIX,
-};
+module.exports = { initDb, get, set, getAll, getByBackup, tagByDeviceIds };

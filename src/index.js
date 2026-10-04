@@ -38,6 +38,7 @@ app.use('/api/sync', syncRoutes);
 app.use('/api/devices', deviceRoutes);
 app.use('/api/ai', aiRoutes);
 app.use('/api/survey', surveyRoutes);
+app.use('/api/admin', require('./routes/admin'));
 
 app.use((req, res) => {
   console.log(`[404] ${req.method} ${req.originalUrl}`);

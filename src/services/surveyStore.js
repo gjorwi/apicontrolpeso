@@ -27,6 +27,7 @@ async function initDb() {
         patientId: { type: String, required: true, index: true },
         patientName: { type: String, default: '' },
         deviceId: { type: String, default: '' },
+        backupId: { type: String, default: '', index: true, sparse: true },
         date: { type: String, required: true, index: true },
         email: { type: String, default: '' },
         status: { type: String, default: 'pending' }, // pending|sent|opened|completed|failed|skipped
@@ -54,6 +55,7 @@ async function initDb() {
         patientId: { type: String, required: true, index: true },
         patientName: { type: String, default: '' },
         deviceId: { type: String, default: '' },
+        backupId: { type: String, default: '', index: true, sparse: true },
         date: { type: String, required: true, index: true },
         questionVersion: { type: Number, default: 1 },
         answers: { type: Mixed, default: [] },
@@ -189,17 +191,25 @@ async function markInvite(token, patch) {
   return next;
 }
 
-async function listInvites({ date, patientId, limit = 500 } = {}) {
+async function listInvites({ date, patientId, backupId, deviceIds, limit = 500 } = {}) {
   if (mongoReady && InviteModel) {
     const filter = {};
     if (date) filter.date = date;
     if (patientId) filter.patientId = patientId;
+    if (backupId) filter.backupId = backupId;
+    if (Array.isArray(deviceIds) && deviceIds.length) filter.deviceId = { $in: deviceIds };
     const docs = await InviteModel.find(filter).sort({ createdAt: -1 }).limit(limit).lean();
     return docs.map(cleanDoc);
   }
   const all = fileRead();
   return Object.values(all.invites)
-    .filter((i) => (!date || i.date === date) && (!patientId || i.patientId === patientId))
+    .filter((i) => {
+      if (date && i.date !== date) return false;
+      if (patientId && i.patientId !== patientId) return false;
+      if (backupId && i.backupId !== backupId) return false;
+      if (Array.isArray(deviceIds) && deviceIds.length && !deviceIds.includes(i.deviceId)) return false;
+      return true;
+    })
     .sort((a, b) => String(b.createdAt || '').localeCompare(String(a.createdAt || '')))
     .slice(0, limit);
 }
@@ -243,17 +253,25 @@ async function updateResponseAi(responseId, ai, aiStatus) {
   return next;
 }
 
-async function listResponses({ date, patientId, limit = 500 } = {}) {
+async function listResponses({ date, patientId, backupId, deviceIds, limit = 500 } = {}) {
   if (mongoReady && ResponseModel) {
     const filter = {};
     if (date) filter.date = date;
     if (patientId) filter.patientId = patientId;
+    if (backupId) filter.backupId = backupId;
+    if (Array.isArray(deviceIds) && deviceIds.length) filter.deviceId = { $in: deviceIds };
     const docs = await ResponseModel.find(filter).sort({ createdAt: -1 }).limit(limit).lean();
     return docs.map(cleanDoc);
   }
   const all = fileRead();
   return Object.values(all.responses)
-    .filter((r) => (!date || r.date === date) && (!patientId || r.patientId === patientId))
+    .filter((r) => {
+      if (date && r.date !== date) return false;
+      if (patientId && r.patientId !== patientId) return false;
+      if (backupId && r.backupId !== backupId) return false;
+      if (Array.isArray(deviceIds) && deviceIds.length && !deviceIds.includes(r.deviceId)) return false;
+      return true;
+    })
     .sort((a, b) => String(b.createdAt || '').localeCompare(String(a.createdAt || '')))
     .slice(0, limit);
 }
@@ -410,6 +428,32 @@ async function saveConfig(patch) {
   return next;
 }
 
+// Etiqueta retroactivamente cualquier invite/response cuyo deviceId esté
+// en la lista, asignándole el backupId si no lo tiene.
+async function tagInvitesByDeviceIds(deviceIds, backupId) {
+  if (!backupId || !Array.isArray(deviceIds) || !deviceIds.length) return { updated: 0 };
+  const all = await listInvites({ deviceIds, limit: 100000 });
+  let updated = 0;
+  for (const inv of all) {
+    if (!inv || inv.backupId === backupId) continue;
+    await markInvite(inv.token, { backupId });
+    updated++;
+  }
+  return { updated };
+}
+
+async function tagResponsesByDeviceIds(deviceIds, backupId) {
+  if (!backupId || !Array.isArray(deviceIds) || !deviceIds.length) return { updated: 0 };
+  const all = await listResponses({ deviceIds, limit: 100000 });
+  let updated = 0;
+  for (const r of all) {
+    if (!r || r.backupId === backupId) continue;
+    await saveResponse({ ...r, backupId });
+    updated++;
+  }
+  return { updated };
+}
+
 module.exports = {
   initDb,
   createInvite,
@@ -421,6 +465,8 @@ module.exports = {
   updateResponseAi,
   listResponses,
   listResponsesNeedingAi,
+  tagInvitesByDeviceIds,
+  tagResponsesByDeviceIds,
   claimDispatch,
   setDispatchSummary,
   getDispatch,
