@@ -44,6 +44,47 @@ async function listAllPatients(deviceId) {
   return Array.from(byId.values());
 }
 
+// Igual que listAllPatients pero además agrega pacientes conocidos únicamente
+// por sus invites/responses (sin snapshot sincronizado). Esto permite que el
+// médico vea el estado de sus encuestas incluso si nunca presionó
+// "Sincronizar" o si el paciente fue creado en otro dispositivo.
+async function listKnownPatients(deviceId) {
+  const known = await listAllPatients(deviceId);
+  const byId = new Map(known.map((x) => [x.patient.id, x]));
+  const [invites, responses] = await Promise.all([
+    surveyStore.listInvites({ limit: 1000 }),
+    surveyStore.listResponses({ limit: 1000 }),
+  ]);
+  const stamp = new Date().toISOString();
+  for (const i of invites) {
+    if (!i.patientId || byId.has(i.patientId)) continue;
+    byId.set(i.patientId, {
+      patient: {
+        id: i.patientId,
+        name: i.patientName || '(sin nombre)',
+        email: i.email || '',
+        updatedAt: i.createdAt || stamp,
+      },
+      deviceId: i.deviceId || deviceId || '',
+      orphaned: true,
+    });
+  }
+  for (const r of responses) {
+    if (!r.patientId || byId.has(r.patientId)) continue;
+    byId.set(r.patientId, {
+      patient: {
+        id: r.patientId,
+        name: r.patientName || '(sin nombre)',
+        email: '',
+        updatedAt: r.createdAt || stamp,
+      },
+      deviceId: r.deviceId || deviceId || '',
+      orphaned: true,
+    });
+  }
+  return Array.from(byId.values());
+}
+
 async function findPatient(patientId, deviceId) {
   const all = await listAllPatients(deviceId);
   const found = all.find((x) => x.patient.id === patientId);
@@ -172,10 +213,16 @@ async function dispatchDay(date, cfg) {
 
 // ------------------------------------------------------ digest de pendientes
 
-function statusFor(patient, date, invite, response) {
-  if (response) return 'completed';
+function statusFor(patient, date, invite, responseToday, lastResponse) {
+  if (responseToday) return 'completed';
   const email = String(patient.email || '').trim();
-  if (!invite) return EMAIL_RE.test(email) ? 'not_sent' : 'no_email';
+  if (!invite) {
+    // Si la invite de hoy no existe pero el paciente ya respondió
+    // recientemente, lo marcamos como "completed" para que el médico lo vea
+    // (caso de respuesta con fecha distinta por zona horaria o TTL amplio).
+    if (lastResponse) return 'completed';
+    return EMAIL_RE.test(email) ? 'not_sent' : 'no_email';
+  }
   if (invite.status === 'completed') return 'completed';
   if (invite.status === 'failed') return 'failed';
   if (invite.status === 'skipped') return 'smtp_not_configured';
@@ -186,18 +233,21 @@ function statusFor(patient, date, invite, response) {
 // Estado de todos los pacientes para una fecha (+ último reporte conocido).
 async function getOverview({ date, deviceId } = {}) {
   const finalDate = date || wallDateStr(new Date());
-  const [patients, invites, responses, recent] = await Promise.all([
-    listAllPatients(deviceId),
+  const [patients, invites, responsesToday, responsesRecent] = await Promise.all([
+    listKnownPatients(deviceId),
     surveyStore.listInvites({ date: finalDate, limit: 2000 }),
     surveyStore.listResponses({ date: finalDate, limit: 2000 }),
     surveyStore.listResponses({ limit: 500 }),
   ]);
 
   const inviteByPatient = new Map(invites.map((i) => [i.patientId, i]));
-  const responseByPatient = new Map(responses.map((r) => [r.patientId, r]));
+  const responseByPatientToday = new Map(responsesToday.map((r) => [r.patientId, r]));
 
+  // Respuesta más reciente por paciente (de cualquier fecha, para detectar
+  // respuestas que caen en otro día por zona horaria o por encuestas con TTL
+  // amplio respondidas más tarde).
   const latestByPatient = new Map();
-  for (const r of recent) {
+  for (const r of responsesRecent) {
     const prev = latestByPatient.get(r.patientId);
     if (!prev || String(r.createdAt || '') > String(prev.createdAt || '')) {
       latestByPatient.set(r.patientId, r);
@@ -206,18 +256,18 @@ async function getOverview({ date, deviceId } = {}) {
 
   const items = patients.map(({ patient, deviceId: dev }) => {
     const invite = inviteByPatient.get(patient.id) || null;
-    const response = responseByPatient.get(patient.id) || null;
+    const responseToday = responseByPatientToday.get(patient.id) || null;
     const last = latestByPatient.get(patient.id) || null;
     return {
       patientId: patient.id,
       name: patient.name || '(sin nombre)',
       email: String(patient.email || '').trim(),
       deviceId: dev,
-      status: statusFor(patient, finalDate, invite, response),
+      status: statusFor(patient, finalDate, invite, responseToday, last),
       sentAt: invite?.sentAt || null,
       resentAt: invite?.resentAt || null,
       source: invite?.source || null,
-      completedAt: response?.createdAt || invite?.completedAt || null,
+      completedAt: responseToday?.createdAt || invite?.completedAt || null,
       lastResponse: last
         ? {
             id: last.responseId,
@@ -348,6 +398,7 @@ async function manualSend({ patientId, deviceId, date }) {
 module.exports = {
   run,
   listAllPatients,
+  listKnownPatients,
   findPatient,
   sendSurveyToPatient,
   getOverview,
