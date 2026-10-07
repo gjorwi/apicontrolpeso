@@ -8,7 +8,7 @@
 //   'urgente'     -> señal de alerta que dispara push al médico
 const DEFAULT_CONFIG = {
   version: 1,
-  enabled: true,
+  enabled: false,
   // 0=domingo .. 6=sábado. Lunes, miércoles y viernes.
   days: [1, 3, 5],
   time: '09:00',        // envío automático del correo
